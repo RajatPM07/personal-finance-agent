@@ -1,0 +1,12 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      - id: ruff
+  - repo: local
+    hooks:
+      - id: no-committed-secrets
+        name: No committed secrets
+        entry: bash -c 'git diff --cached --name-only | grep -Ev "\.example\." | xargs -I{} grep -lE "(ANTHROPIC|GEMINI|GROQ|SUPABASE_SERVICE_KEY|TELEGRAM_BOT_TOKEN)=[A-Za-z0-9]" {} 2>/dev/null && exit 1 || exit 0'
+        language: system
+        pass_filenames: false

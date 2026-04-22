@@ -1,0 +1,65 @@
+[project]
+name = "personal-finance-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.4,<4",
+    "apscheduler>=3.10,<4",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.29,<1",
+    "litellm==1.83.*",
+    "pikepdf>=8",
+    "pdfplumber>=0.11",
+    "camelot-py>=0.11",  # `[cv]` extra removed in camelot-py 1.0+; opencv-python-headless is now a core dep (verified 2026-04-21)
+    "rapidfuzz>=3",
+    "supabase>=2.5,<3",
+    # `bout` intentionally removed — preconditions notes §0.1 found it does NOT parse PDFs
+    # (it's a CSV→QIF converter). Week 1 uses pikepdf + pdfplumber directly for the ICICI
+    # smoke. A real row-level parser lands in Week 2 and will be added to deps then.
+    #
+    # `casparser` intentionally removed from Week 1 — it hard-pins pdfminer-six==20240706
+    # (verified 2026-04-21 via Task 1 resolver failure) which conflicts with pdfplumber>=0.11.
+    # casparser is only needed by Week 3 MF CAS ingestion; added back then, likely with a
+    # pdfplumber version constraint adjustment at that point. Log the conflict in lessons.md.
+    "mftool>=2.10",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "requests>=2.31",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "pyyaml>=6",
+    "python-dotenv>=1",               # used by scripts/backup_supabase.py to load .env under launchd
+    "google-auth>=2.28",
+    "google-api-python-client>=2.120",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.12",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM"]
+ignore = ["E501"]  # line-length enforced separately
+
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+# Third-party libs without stubs
+[[tool.mypy.overrides]]
+module = ["bout.*", "casparser.*", "mftool.*", "camelot.*", "pdfplumber.*", "pikepdf.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

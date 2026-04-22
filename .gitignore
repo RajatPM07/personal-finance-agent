@@ -1,0 +1,43 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+credentials.yaml
+!credentials.example.yaml
+credentials/
+!credentials/.gitkeep
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Finance data
+finance-inbox/
+finance-backups/
+*.pdf
+*.csv
+*.xlsx
+
+# Logs
+*.log
+logs/
+
+# Additions per tasks/todo.md Step 1.2
+launchd/*.local.plist
+~/finance-logs/
+tasks/preconditions-notes.md
+*.local.sql
