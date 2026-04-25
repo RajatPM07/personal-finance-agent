@@ -1,6 +1,25 @@
+# Personal Finance Agent — LLM task → model routing
+#
+# Background:
+# - Per Task 0 preconditions check (2026-04-21) and live smoke (2026-04-25):
+#   * gemini/gemini-2.5-flash + groq/llama-3.3-70b-versatile work on free tier
+#   * gemini/gemini-2.5-pro free-tier quota = 0 (FAILED smoke)
+#   * anthropic/claude-sonnet-4-6 needs paid credit (FAILED smoke until top-up)
+# - Stakes:high tasks (PDF extraction, sql_agent, affordability_reasoning) keep
+#   Claude as primary because PRD §6.4 explicitly chose them on reasoning quality.
+#   While Anthropic is unfunded, those calls will fail over to a documented-
+#   degraded zero-cost model. Surface the degradation honestly rather than
+#   silently swap weaker primaries.
+# - Gemini 2.5 Pro removed as fallback everywhere — its free-tier quota is 0,
+#   so it was a dead option. Replaced with groq/llama-3.3-70b-versatile where
+#   the task is text-only (sql_agent, affordability_reasoning).
+# - pdf_extraction's fallback STAYS on Claude Sonnet because it's the only
+#   vision-capable option in this stack besides Gemini. Substituting Groq Llama
+#   would be silently wrong — Llama 3.3 70B is text-only.
+
 pdf_extraction:
   model: gemini/gemini-2.5-flash
-  fallbacks: [anthropic/claude-sonnet-4-6]
+  fallbacks: [anthropic/claude-sonnet-4-6]   # vision-capable; needs paid Anthropic to fire
   stakes: high
 
 merchant_categorization:
@@ -15,13 +34,13 @@ income_classification:
 
 sql_agent:
   model: anthropic/claude-sonnet-4-6
-  fallbacks: [gemini/gemini-2.5-pro]
-  stakes: high
+  fallbacks: [groq/llama-3.3-70b-versatile]   # zero-cost degraded fallback. Was gemini-2.5-pro (free-tier=0).
+  stakes: high                                # When fallback fires, user sees materially-worse SQL on complex multi-table queries — verify outputs.
 
 affordability_reasoning:
   model: anthropic/claude-sonnet-4-6
-  fallbacks: [gemini/gemini-2.5-pro]
-  stakes: high
+  fallbacks: [groq/llama-3.3-70b-versatile]   # zero-cost degraded fallback. Same rationale as sql_agent.
+  stakes: high                                # PRD §6.5 data-quality guard provides defence-in-depth for this task.
 
 morning_brief:
   model: gemini/gemini-2.5-flash
