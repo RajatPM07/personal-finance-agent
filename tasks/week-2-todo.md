@@ -1,18 +1,19 @@
-# Week 2 — PFA Ingestion Implementation Plan (revision 1)
+# Week 2 — PFA Ingestion Implementation Plan (revision 2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** End-to-end ingestion pipeline for ICICI CC and AMEX CC PDF statements with statement-total integrity validation, AMEX dual-model calibration, and graceful failure paths. By end of Week 2, three months of ICICI CC + AMEX CC history are in `transactions`, and new monthly statements drop into `~/finance-inbox/` (or via Telegram doc) and process automatically.
+**Goal:** End-to-end ingestion pipeline for ICICI CC (PDF) and AMEX CC (XLSX) statements with statement-total integrity validation and graceful failure paths. By end of Week 2, three months of ICICI CC + AMEX CC history are in `transactions`, and new monthly statements drop into `~/finance-inbox/` (or via Telegram doc) and process automatically.
 
-**Architecture:** Four isolated layers — Source (folder watcher + Telegram doc handler) → Parse (deterministic ICICI, LLM AMEX) → Validate (pure-fn statement-total comparator) → Persist (Mode-B `import_hash` + Supabase upsert + `ingestion_log`). Spec at `docs/superpowers/specs/2026-04-26-week-2-ingestion-design.md`.
+**Architecture:** Four isolated layers — Source (folder watcher + Telegram doc handler) → Parse (deterministic ICICI via `pikepdf+pdfplumber`, deterministic AMEX via `pandas.read_excel`) → Validate (pure-fn statement-total comparator) → Persist (Mode-B `import_hash` + Supabase upsert + `ingestion_log`). Spec at `docs/superpowers/specs/2026-04-26-week-2-ingestion-design.md`.
 
-**Tech Stack:** Python 3.11, `pikepdf` (decrypt), `pdfplumber` (ICICI text extraction), `pdf2image` + `Pillow` + `poppler` (AMEX rasterization), LiteLLM `pdf_extraction` task (Gemini Flash primary, Claude Haiku for AMEX calibration), `watchdog` (folder watcher), aiogram (Telegram doc handler), pydantic v2 (LLM schema enforcement), supabase-py (upsert).
+**Tech Stack:** Python 3.11, `pikepdf` (ICICI decrypt), `pdfplumber` (ICICI text extraction), `pandas` + `openpyxl` (AMEX XLSX), `watchdog` (folder watcher), aiogram (Telegram doc handler), supabase-py (upsert).
 
 **PRD reference:** `PRD.md` V2.1 §6 (model routing), §7 (schema), §11 Week 2 (partially superseded), §18.4 (PDF integrity), §19.5 (`import_hash` Mode B).
-**Lessons referenced (do NOT repeat):** bout-is-CSV-only (parser must be built from scratch), aiogram-handle_signals (already fixed in app.py), Supavisor-username (Week 5 SQL agent), RLS-auto-enable (already disabled), CLAUDE.md invariants #2 (`.execute()` terminator), #4 (manual `__parser_version__`), #11 (verify, don't assume).
+**Lessons referenced (do NOT repeat):** bout-is-CSV-only, aiogram-handle_signals, Supavisor-username, RLS-auto-enable, CLAUDE.md invariants #2 (`.execute()`), #4 (manual `__parser_version__`), #11 (verify, don't assume).
 
 **Revision history:**
-- **r1 (2026-04-26):** initial plan after 4-question brainstorm and locked spec.
+- **r2 (2026-04-26):** AMEX file format clarified as XLSX (not password-protected PDF). Dropped LLM-AMEX path, dual-model calibration, `pdf2image`/`Pillow`/`poppler` deps, `lib/llm.py` `images` parameter re-add. 12 tasks → 10. AMEX parser becomes deterministic `pandas.read_excel`. ₹200 calibration budget freed; full $5 Anthropic balance reserved for Week 4 reasoning.
+- r1 (2026-04-26): initial plan after 4-question brainstorm and locked spec v1.
 
 ---
 
@@ -20,13 +21,12 @@
 
 Every box must be green before Task 0 starts.
 
-- [ ] `brew install poppler` (required by `pdf2image`; ARM Homebrew bottle is fine)
-- [ ] AMEX CC PDF copied to `tests/golden_fixtures/amex_sample.pdf` (gitignored; one real recent statement)
-- [ ] `AMEX_PDF_PASSWORD` env var available for the implementation session: `export AMEX_PDF_PASSWORD=<your statement password>`
+- [ ] AMEX CC XLSX copied to `tests/golden_fixtures/amex_sample.xlsx` (gitignored; one real recent statement)
 - [ ] `ICICI_PDF_PASSWORD` env var (already used in Week 1's Task 9 smoke; same value)
-- [ ] Anthropic balance shows ≥ ₹420 (current $5; calibration expected to use ≤ ₹15 of it)
 - [ ] launchd-supervised app is healthy (`launchctl print gui/$(id -u)/com.rajat.pfa.app | grep state` → `running`)
 - [ ] `git config --local user.{name,email}` set so commits don't need `-c` flags
+
+(No `brew install poppler`, no `AMEX_PDF_PASSWORD`, no Anthropic top-up needed — all dropped in r2.)
 
 ---
 
@@ -39,20 +39,18 @@ All paths relative to `/Users/rajat/AntiGravity/Personal finance Agent/`.
 - `skills/finance/ingestion/statement_validator.py` — pure `validate(parse_result) → ValidationResult`
 - `skills/finance/ingestion/pipeline.py` — `async ingest(parse_result, account_id, source_meta) → IngestionLogEntry`
 - `skills/finance/ingestion/parsers/icici_cc.py` — `parse(pdf_path, password) → ParseResult`, `__parser_version__ = "icici-cc/v1"`
-- `skills/finance/ingestion/parsers/amex_cc.py` — `parse(pdf_path, password) → ParseResult`, `__parser_version__ = "amex-cc-llm/v1"`
-- `skills/finance/ingestion/calibration.py` — `async calibrate_amex(pdf_path, password) → list[ParsedRow]` (dual-model diff + Telegram adjudication)
-- `skills/finance/ingestion/folder_watcher.py` — `watchdog` Observer; `async run()` task
+- `skills/finance/ingestion/parsers/amex_cc.py` — `parse(xlsx_path, password=None) → ParseResult`, `__parser_version__ = "amex-cc-xlsx/v1"`
+- `skills/finance/ingestion/folder_watcher.py` — `watchdog` Observer; `async run()` task; dispatches `*.pdf` AND `*.xlsx`
 - `skills/finance/bot/document_handler.py` — aiogram `Document` handler with auto-rename
-- `tests/test_statement_validator.py`, `test_icici_cc_parser.py`, `test_amex_cc_parser.py`, `test_pipeline.py`, `test_calibration.py`, `test_folder_watcher.py`, `test_document_handler.py`
+- `tests/test_statement_validator.py`, `test_icici_cc_parser.py`, `test_amex_cc_parser.py`, `test_pipeline.py`, `test_folder_watcher.py`, `test_document_handler.py`
 
 **Modified in Week 2:**
-- `skills/finance/lib/llm.py` — re-add `images: list[str] | None = None` parameter
 - `skills/finance/bot/main.py` — register `document_handler` + `/model list` command
-- `app.py` — start folder watcher in `asyncio.gather` alongside bot/scheduler/HTTP; include in graceful shutdown
-- `pyproject.toml` — add `watchdog>=3`, `pdf2image>=1.17` to deps
+- `app.py` — start folder watcher in `asyncio.gather`; include in graceful shutdown
+- `pyproject.toml` — add `watchdog>=3` to deps (only)
 
-**Deferred (out of scope per spec §2):**
-Gmail integration (Week 3), bank-savings parsers (Week 3), Paytm/MF/Zerodha/payslip (Week 3), merchant normalization (Week 5), categorization (Week 4), refund detection (Week 4), full `/model` family (Week 4), SQL agent + affordability (Week 4).
+**NOT modified (deferred indefinitely):**
+- `skills/finance/lib/llm.py` — the `images` parameter re-add was tied to LLM-AMEX path. Not needed.
 
 ---
 
@@ -60,34 +58,32 @@ Gmail integration (Week 3), bank-savings parsers (Week 3), Paytm/MF/Zerodha/pays
 
 Catches library API surprises before they poison downstream tasks (CLAUDE.md invariant #11).
 
-- [ ] **Step 0.1: Verify `pdf2image` + `poppler` work on this Mac**
+- [ ] **Step 0.1: Verify `pandas.read_excel` works on the AMEX fixture**
 
 ```bash
 cd "/Users/rajat/AntiGravity/Personal finance Agent"
 source .venv/bin/activate
-pip install pdf2image
 python -c "
-from pdf2image import convert_from_path
-import tempfile
-import pikepdf
-import os
-pwd = os.environ.get('ICICI_PDF_PASSWORD', '')
-with pikepdf.open('tests/golden_fixtures/icici_sample.pdf', password=pwd) as pdf:
-    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as t:
-        pdf.save(t.name)
-        pages = convert_from_path(t.name)
-        print(f'pdf2image OK: {len(pages)} pages, first page size = {pages[0].size}')
-        os.unlink(t.name)
+import pandas as pd
+df = pd.read_excel('tests/golden_fixtures/amex_sample.xlsx', engine='openpyxl', header=None, nrows=30)
+print('AMEX XLSX read OK')
+print(f'shape (first 30 rows × cols): {df.shape}')
+print()
+print('=== first 30 rows preview (verbatim cell values, NaN visible) ===')
+for i, row in df.iterrows():
+    cells = [str(v)[:40] if pd.notna(v) else 'NaN' for v in row.values[:10]]
+    print(f'  row {i}: {cells}')
 "
 deactivate
 ```
 
-Record findings in `tasks/week-2-preconditions-notes.md`:
-- Number of pages in the ICICI fixture
-- Page size in pixels
-- Any errors / warnings about poppler
+Record findings into `tasks/week-2-preconditions-notes.md`:
+- The actual header row index (often row 0 or row 5–10 depending on AMEX export variant)
+- The actual column names AMEX is using (Date / Description / Amount / etc.)
+- Whether amount is signed (positive=charge, negative=credit) or split into separate Debit/Credit columns
+- Whether there's a "Total" / "Statement Total" footer row
 
-If `pdf2image` raises `PDFInfoNotInstalledError`, `brew install poppler` was missed — STOP, report BLOCKED.
+If the headers don't match any of the three layouts in spec §6.3's `KNOWN_COLUMN_SETS`, **add a 4th entry to the parser before Task 4** based on observed names. This is exactly what spec §16.2 anticipates.
 
 - [ ] **Step 0.2: Verify `supabase-py` upsert with `on_conflict` + `ignore_duplicates`**
 
@@ -105,47 +101,22 @@ print(f'param names: {list(sig.parameters.keys())}')
 deactivate
 ```
 
-Confirm `on_conflict` and `ignore_duplicates` are accepted parameters. If signature is materially different from what spec §8 assumed, document the actual signature in `tasks/week-2-preconditions-notes.md` and propose the fallback (per-row insert with try/except for unique-constraint violation). Update Task 6 inline with the correct approach before implementation begins.
+Confirm `on_conflict` and `ignore_duplicates` are accepted parameters. If signature differs from what spec §8 / Task 5 (pipeline) assumes, document the actual signature in `tasks/week-2-preconditions-notes.md` and propose the fallback (per-row insert with try/except for unique-constraint violation). Update Task 5 inline before implementation.
 
-- [ ] **Step 0.3: Verify pikepdf can decrypt the AMEX fixture**
-
-```bash
-cd "/Users/rajat/AntiGravity/Personal finance Agent"
-source .venv/bin/activate
-python -c "
-import pikepdf, os
-pwd = os.environ.get('AMEX_PDF_PASSWORD', '')
-if not pwd:
-    print('AMEX_PDF_PASSWORD env var not set — STOP')
-    raise SystemExit(2)
-with pikepdf.open('tests/golden_fixtures/amex_sample.pdf', password=pwd) as pdf:
-    print(f'AMEX decrypt OK: {len(pdf.pages)} pages')
-"
-deactivate
-```
-
-If pikepdf raises `PasswordError`, the credential is wrong — verify with Rajat before proceeding.
-
-- [ ] **Step 0.4: Save preconditions notes (gitignored)**
+- [ ] **Step 0.3: Make sure `tasks/week-2-preconditions-notes.md` is gitignored**
 
 ```bash
 cd "/Users/rajat/AntiGravity/Personal finance Agent"
-# tasks/week-2-preconditions-notes.md — SAME pattern as Week 1's preconditions-notes.md
-# Already gitignored via *.preconditions-notes.md? No — re-check .gitignore
 grep -E "preconditions-notes" .gitignore || echo "tasks/week-2-preconditions-notes.md" >> .gitignore
+git check-ignore -v tasks/week-2-preconditions-notes.md
 ```
 
-Confirm the file appears in `.gitignore`. If `.gitignore` rule for Week 1's `tasks/preconditions-notes.md` was specific (not a glob), add the Week 2 path explicitly.
-
-- [ ] **Step 0.5: Commit `.gitignore` adjustment if needed**
-
-If `.gitignore` was modified in Step 0.4, commit:
+Expected: `git check-ignore` prints a hit. If `.gitignore` was modified, commit:
 ```bash
 git add .gitignore
-git commit -m "chore(gitignore): add Week 2 preconditions-notes path"
+git -c user.name="Rajat Sharma" -c user.email="sharma.rajat70@gmail.com" \
+    commit -m "chore(gitignore): add Week 2 preconditions-notes path"
 ```
-
-If unchanged, skip.
 
 ---
 
@@ -162,27 +133,32 @@ If unchanged, skip.
 import pytest
 from unittest.mock import mock_open, patch
 
+
 def test_detect_bank_icici_canonical():
     from skills.finance.ingestion._common import detect_bank_from_filename
     assert detect_bank_from_filename("icici_cc_2026_05.pdf") == "icici_cc"
+
 
 def test_detect_bank_icici_loose():
     from skills.finance.ingestion._common import detect_bank_from_filename
     assert detect_bank_from_filename("Statement_April_2026_ICICI_CC.pdf") == "icici_cc"
 
-def test_detect_bank_amex_loose():
+
+def test_detect_bank_amex_loose_xlsx():
     from skills.finance.ingestion._common import detect_bank_from_filename
-    assert detect_bank_from_filename("AMEX_Statement_2026_05.pdf") == "amex_cc"
-    assert detect_bank_from_filename("american_express_may.pdf") == "amex_cc"
+    assert detect_bank_from_filename("AMEX_Statement_2026_05.xlsx") == "amex_cc"
+    assert detect_bank_from_filename("american_express_may.xlsx") == "amex_cc"
+
 
 def test_detect_bank_no_match_returns_none():
     from skills.finance.ingestion._common import detect_bank_from_filename
     assert detect_bank_from_filename("randomfile.pdf") is None
 
+
 def test_detect_bank_ambiguous_returns_none():
     from skills.finance.ingestion._common import detect_bank_from_filename
-    # When BOTH icici and amex tokens appear, watcher must reject as ambiguous
     assert detect_bank_from_filename("icici_amex_partnership_statement.pdf") is None
+
 
 def test_password_lookup_unique_prefix():
     from skills.finance.ingestion._common import password_lookup
@@ -190,27 +166,22 @@ def test_password_lookup_unique_prefix():
 icici_cc_1008:
   pattern: "custom"
   value: "icici_pass_123"
-amex_cc_4003:
-  pattern: "NAME_DDMM"
-  value: "amex_pass_456"
 """
     with patch("builtins.open", mock_open(read_data=fake_yaml)):
         assert password_lookup("icici_cc") == "icici_pass_123"
-        assert password_lookup("amex_cc") == "amex_pass_456"
+
 
 def test_password_lookup_exact_key_with_last4():
     from skills.finance.ingestion._common import password_lookup
     fake_yaml = """
 icici_cc_1008:
-  pattern: "custom"
   value: "icici_pass_1008"
 icici_cc_9999:
-  pattern: "custom"
   value: "icici_pass_9999"
 """
     with patch("builtins.open", mock_open(read_data=fake_yaml)):
         assert password_lookup("icici_cc", last4="1008") == "icici_pass_1008"
-        assert password_lookup("icici_cc", last4="9999") == "icici_pass_9999"
+
 
 def test_password_lookup_ambiguous_without_last4_raises():
     from skills.finance.ingestion._common import password_lookup, AmbiguousCredentialError
@@ -222,7 +193,7 @@ icici_cc_9999:
 """
     with patch("builtins.open", mock_open(read_data=fake_yaml)):
         with pytest.raises(AmbiguousCredentialError):
-            password_lookup("icici_cc")  # multiple matches, no last4 disambiguator
+            password_lookup("icici_cc")
 ```
 
 - [ ] **Step 1.2: Run tests, verify all fail**
@@ -274,7 +245,7 @@ class ParsedRow:
     amount: Decimal                       # always positive; sign info on `direction`
     direction: Literal["in", "out"]
     raw_merchant: str
-    source_row_ordinal: int                # 1..N within the PDF, deterministic per parser
+    source_row_ordinal: int                # 1..N within the file, deterministic per parser
 
 
 @dataclass(frozen=True)
@@ -282,13 +253,17 @@ class ParseResult:
     rows: list[ParsedRow]
     declared_totals: dict                  # {'total_spends': Decimal, 'total_credits': Decimal,
                                            #  'closing_balance': Decimal | None}
-    pdf_content_hash: str                  # sha256 of source PDF bytes; threaded into import_hash
+    pdf_content_hash: str                  # sha256 of source FILE bytes (PDF or XLSX);
+                                           #   threaded into import_hash. Field name kept as
+                                           #   pdf_content_hash for schema compatibility with
+                                           #   transactions table; despite the name, also used
+                                           #   for XLSX content hashing.
     parser_version: str                    # e.g. "icici-cc/v1"
 
 
 @dataclass(frozen=True)
 class SourceMeta:
-    source: Literal["manual_pdf", "telegram_pdf", "gmail_cc_stmt"]
+    source: Literal["manual_pdf", "manual_xlsx", "telegram_pdf", "telegram_xlsx", "gmail_cc_stmt"]
     source_ref: str                        # filename / message_id / email_id
 
 
@@ -309,14 +284,13 @@ def detect_bank_from_filename(filename: str) -> Bank | None:
 
     Returns 'icici_cc' if filename contains 'icici' AND 'cc'.
     Returns 'amex_cc' if filename contains 'amex' OR 'american'.
-    Returns None if both or neither match (ambiguous and unknown collapse to None;
-    caller distinguishes by re-checking).
+    Returns None if both or neither match.
     """
     name = filename.lower()
     is_icici = ("icici" in name) and ("cc" in name)
     is_amex = ("amex" in name) or ("american" in name)
     if is_icici and is_amex:
-        return None  # ambiguous — caller must reject
+        return None
     if is_icici:
         return "icici_cc"
     if is_amex:
@@ -328,9 +302,10 @@ def password_lookup(bank: Bank, last4: str | None = None,
                     credentials_path: Path = Path("credentials.yaml")) -> str:
     """Read credentials.yaml. Returns the password for the given bank.
 
-    If last4 is provided, looks up the exact key '<bank>_<last4>'.
-    If last4 is None, finds the unique key starting with '<bank>_'. Raises
-    AmbiguousCredentialError if multiple match (caller must disambiguate).
+    NB: AMEX in V1 is XLSX without a password — callers should not invoke this
+    helper for `bank='amex_cc'`. ICICI is the only V1 caller. The function still
+    accepts the bank parameter for forward-compatibility with future
+    password-protected sources.
     """
     with open(credentials_path) as f:
         creds: dict = yaml.safe_load(f) or {}
@@ -368,7 +343,6 @@ Expected: 8 passed.
 ```bash
 make lint && make typecheck
 ```
-Both must be clean.
 
 - [ ] **Step 1.6: Commit**
 
@@ -429,7 +403,6 @@ def test_validator_exact_match():
 
 def test_validator_within_tolerance_rs1():
     from skills.finance.ingestion.statement_validator import validate
-    # Extracted ₹150 vs declared ₹150.50 — 50p delta, within ₹1 tolerance
     pr = _make_pr([_row(100, "out", 1), _row(50, "out", 2)], "150.50", 0)
     res = validate(pr)
     assert res.ok is True
@@ -438,7 +411,6 @@ def test_validator_within_tolerance_rs1():
 
 def test_validator_over_tolerance_rejects():
     from skills.finance.ingestion.statement_validator import validate
-    # Extracted ₹150 vs declared ₹152 — ₹2 delta, OVER tolerance
     pr = _make_pr([_row(100, "out", 1), _row(50, "out", 2)], 152, 0)
     res = validate(pr)
     assert res.ok is False
@@ -447,7 +419,6 @@ def test_validator_over_tolerance_rejects():
 
 def test_validator_all_credits():
     from skills.finance.ingestion.statement_validator import validate
-    # Refund-only statement
     pr = _make_pr([_row(200, "in", 1), _row(50, "in", 2)], 0, 250)
     res = validate(pr)
     assert res.ok is True
@@ -463,12 +434,10 @@ def test_validator_zero_rows_zero_totals():
 
 def test_validator_signed_amount_negative_rejected():
     from skills.finance.ingestion.statement_validator import validate
-    # Per spec §6.1, amount must be positive; sign info lives on direction.
-    # If a parser ever emits negative amount, validator should still compute correctly.
-    # (Defensive — abs the deltas.)
-    pr = _make_pr([_row(-100, "out", 1)], 100, 0)  # parser bug emits -100
+    # Defensive: if a parser ever emits negative amount (it shouldn't), validator
+    # computes correctly via abs() on the deltas.
+    pr = _make_pr([_row(-100, "out", 1)], 100, 0)
     res = validate(pr)
-    # extracted_out = -100 vs declared_out = 100 → delta = 200 → reject
     assert res.ok is False
 ```
 
@@ -477,7 +446,7 @@ def test_validator_signed_amount_negative_rejected():
 ```bash
 pytest tests/test_statement_validator.py -v
 ```
-Expected: 6 errors (ModuleNotFoundError).
+Expected: 6 errors.
 
 - [ ] **Step 2.3: Implement `statement_validator.py`**
 
@@ -485,7 +454,12 @@ Expected: 6 errors (ModuleNotFoundError).
 # skills/finance/ingestion/statement_validator.py
 """Pure function: compare a ParseResult's row totals against its declared totals.
 
-No I/O. Easy to unit-test. Used by pipeline.py before any DB write."""
+No I/O. Easy to unit-test. Used by pipeline.py before any DB write.
+
+Caveat: AMEX XLSX exports may not include a declared totals row (see spec §6.3
++ §9.2). In that case the AMEX parser sets declared_totals from row sums, and
+this validator passes tautologically. The annotation on the success message
+makes the weakness visible to the user."""
 from __future__ import annotations
 from decimal import Decimal
 from skills.finance.ingestion._common import ParseResult, ValidationResult
@@ -531,7 +505,6 @@ Expected: 6 passed.
 ```bash
 make lint && make typecheck && make test
 ```
-Expected: clean across the board, total test count = 13 + 8 + 6 = 27 passed (+ 1 skipped from PDF smoke).
 
 - [ ] **Step 2.6: Commit**
 
@@ -542,117 +515,16 @@ git commit -m "feat(ingestion): pure-fn statement-total validator with ±₹1 to
 
 ---
 
-## Task 3: Re-add `images` parameter to `lib/llm.py`
-
-The parameter was removed in Week 1 as YAGNI. Now AMEX parser needs it.
-
-**Files:**
-- Modify: `skills/finance/lib/llm.py`
-- Modify (extend): `tests/test_llm.py`
-
-- [ ] **Step 3.1: Write failing test for image parameter handling**
-
-Add to `tests/test_llm.py`:
-
-```python
-def test_llm_passes_images_to_litellm():
-    """Re-added in Week 2 for AMEX page-image extraction."""
-    from skills.finance.lib.llm import llm
-    from unittest.mock import patch, MagicMock
-
-    fake_b64 = "data:image/png;base64,AAAA"  # placeholder
-    with patch("skills.finance.lib.llm.litellm.completion") as mock_completion:
-        mock_completion.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content="ok"))]
-        )
-        llm("pdf_extraction", prompt="extract", images=[fake_b64])
-        _, kwargs = mock_completion.call_args
-        # The `images` are merged into the user message content as multipart
-        user_msg = next(m for m in kwargs["messages"] if m["role"] == "user")
-        # Content should be a list of dicts when images are present
-        assert isinstance(user_msg["content"], list)
-        assert any(
-            part.get("type") == "image_url" and part["image_url"]["url"] == fake_b64
-            for part in user_msg["content"]
-        )
-```
-
-- [ ] **Step 3.2: Run test, verify it fails**
-
-```bash
-pytest tests/test_llm.py::test_llm_passes_images_to_litellm -v
-```
-Expected: TypeError or assertion failure (images param doesn't exist or isn't passed through).
-
-- [ ] **Step 3.3: Update `lib/llm.py`**
-
-Read the current `lib/llm.py` to find the `llm()` function. Replace its signature and body:
-
-```python
-def llm(task: str, prompt: str, system: str | None = None,
-        images: list[str] | None = None):
-    """Single entry point for all LLM calls. Routes by task name via model_routing.yaml.
-
-    images: optional list of image references (base64 data URLs or http URLs).
-    When provided, the user message becomes multipart with one image_url part
-    per image plus the text prompt. Used by AMEX page-image extraction (Week 2);
-    re-added after Week 1 had removed it as YAGNI.
-    """
-    if task not in ROUTING:
-        raise KeyError(f"Unknown task '{task}'. Known: {list(ROUTING.keys())}")
-    cfg = ROUTING[task]
-
-    messages: list[dict] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-
-    if images:
-        content: list[dict] = [{"type": "text", "text": prompt}]
-        for img in images:
-            content.append({"type": "image_url", "image_url": {"url": img}})
-        messages.append({"role": "user", "content": content})
-    else:
-        messages.append({"role": "user", "content": prompt})
-
-    return litellm.completion(
-        model=cfg["model"],
-        messages=messages,
-        fallbacks=cfg.get("fallbacks", []),
-        metadata={"task": task},
-    )
-```
-
-- [ ] **Step 3.4: Run all `lib/llm.py` tests**
-
-```bash
-pytest tests/test_llm.py -v
-```
-Expected: 3 passed (the 2 existing tests + 1 new image test).
-
-- [ ] **Step 3.5: Lint, typecheck**
-
-```bash
-make lint && make typecheck
-```
-
-- [ ] **Step 3.6: Commit**
-
-```bash
-git add skills/finance/lib/llm.py tests/test_llm.py
-git commit -m "feat(llm): re-add images parameter for multimodal extraction (Week 2 prep)"
-```
-
----
-
-## Task 4: ICICI CC parser
+## Task 3: ICICI CC parser (deterministic PDF)
 
 **Files:**
 - Create: `skills/finance/ingestion/parsers/icici_cc.py`
+- Create: `skills/finance/ingestion/parsers/__init__.py` (empty)
 - Test: `tests/test_icici_cc_parser.py`
 
-The parser is calibrated against the real golden fixture. Tests skip when fixture absent or password env var unset (mirrors Week 1's `test_pdf_smoke.py` pattern).
+The parser is calibrated against the Week 1 golden fixture at `tests/golden_fixtures/icici_sample.pdf`. Tests skip when fixture absent or password env var unset (mirrors `test_pdf_smoke.py`).
 
-- [ ] **Step 4.1: Write tests (golden fixture + structure assertions)**
+- [ ] **Step 3.1: Write tests**
 
 ```python
 # tests/test_icici_cc_parser.py
@@ -668,7 +540,6 @@ PASSWORD = os.environ.get("ICICI_PDF_PASSWORD", "")
 
 def test_parser_version_string():
     from skills.finance.ingestion.parsers.icici_cc import __parser_version__
-    # CLAUDE.md invariant #4 — manually curated; bumping is deliberate.
     assert __parser_version__ == "icici-cc/v1"
 
 
@@ -681,7 +552,7 @@ def test_parse_returns_nonempty_parseresult():
     assert result.declared_totals["total_spends"] >= Decimal("0")
     assert result.declared_totals["total_credits"] >= Decimal("0")
     assert result.parser_version == "icici-cc/v1"
-    assert len(result.pdf_content_hash) == 64  # sha256 hex
+    assert len(result.pdf_content_hash) == 64
 
 
 @pytest.mark.skipif(not FIXTURE.exists(), reason="ICICI golden fixture not present")
@@ -690,17 +561,16 @@ def test_parsed_row_fields_well_formed():
     from skills.finance.ingestion.parsers.icici_cc import parse
     result = parse(FIXTURE, password=PASSWORD)
     for row in result.rows:
-        assert row.amount > Decimal("0"), "amount must be positive (sign on direction)"
+        assert row.amount > Decimal("0")
         assert row.direction in ("in", "out")
-        assert row.raw_merchant.strip(), "raw_merchant must not be blank"
+        assert row.raw_merchant.strip()
         assert row.source_row_ordinal >= 1
 
 
 @pytest.mark.skipif(not FIXTURE.exists(), reason="ICICI golden fixture not present")
 @pytest.mark.skipif(not PASSWORD, reason="ICICI_PDF_PASSWORD env var not set")
 def test_ordinals_contiguous_1_to_N():
-    """CLAUDE.md testing §: assert ordinals contiguous 1..N — catches silent ordering drift
-    that would corrupt import_hash on re-parse."""
+    """CLAUDE.md testing §: assert ordinals contiguous 1..N — catches silent ordering drift."""
     from skills.finance.ingestion.parsers.icici_cc import parse
     result = parse(FIXTURE, password=PASSWORD)
     ordinals = [r.source_row_ordinal for r in result.rows]
@@ -718,18 +588,18 @@ def test_extracted_totals_match_declared_via_validator():
     assert val.ok, (
         f"Validator failed on real ICICI fixture — "
         f"delta_in={val.delta_in}, delta_out={val.delta_out}. "
-        f"Either parser is wrong, or declared totals on the statement need re-checking."
+        f"Either parser regex is off, or declared totals labels need calibration."
     )
 ```
 
-- [ ] **Step 4.2: Run tests, verify the version assertion fails (rest are skipped because parser doesn't exist)**
+- [ ] **Step 3.2: Run tests, verify failures**
 
 ```bash
 pytest tests/test_icici_cc_parser.py -v
 ```
-Expected: ImportError (no parser module yet).
+Expected: ImportError or 5 errors.
 
-- [ ] **Step 4.3: Implement `icici_cc.py` — first draft, calibrate against fixture**
+- [ ] **Step 3.3: Implement `icici_cc.py`**
 
 ```python
 # skills/finance/ingestion/parsers/icici_cc.py
@@ -757,11 +627,6 @@ from skills.finance.ingestion._common import ParsedRow, ParseResult
 # extracted output shape would change for the same input.
 __parser_version__ = "icici-cc/v1"
 
-# Matches lines like:  15/05/2026  SWIGGY INSTAMART HSR LAYO...  3,400.00 Cr
-# - date in DD/MM/YYYY
-# - merchant text (greedy, then non-greedy back to amount)
-# - amount with optional thousand separators
-# - optional 'Cr' suffix → credit; absence → debit
 ROW_RE = re.compile(
     r"^(?P<date>\d{2}/\d{2}/\d{4})\s+"
     r"(?P<merchant>.+?)\s+"
@@ -769,9 +634,9 @@ ROW_RE = re.compile(
     r"(?:\s*(?P<cr>Cr))?\s*$"
 )
 
-# Declared totals labels — calibrate against the actual ICICI statement.
-# These are the labels that appear in the summary block of the real statement;
-# adjust during calibration if your statement uses different wording.
+# Calibrate these labels against the real fixture during implementation. ICICI
+# uses different wording across statement variants; the validator going ok=False
+# on the real fixture is the surface to adjust here.
 TOTAL_SPENDS_RE = re.compile(r"Total\s+(?:Purchases|Spends|Debits).*?([\d,]+\.\d{2})", re.IGNORECASE)
 TOTAL_CREDITS_RE = re.compile(r"Total\s+(?:Credits|Payments).*?([\d,]+\.\d{2})", re.IGNORECASE)
 CLOSING_BAL_RE = re.compile(r"(?:Closing|Total\s+Amount\s+Due).*?([\d,]+\.\d{2})", re.IGNORECASE)
@@ -852,226 +717,319 @@ def parse(pdf_path: Path, password: str) -> ParseResult:
     )
 ```
 
-- [ ] **Step 4.4: Run tests against the real fixture**
+- [ ] **Step 3.4: Run tests; calibrate regexes if needed**
 
 ```bash
 pytest tests/test_icici_cc_parser.py -v
 ```
 Expected: 5 passed.
 
-If `test_extracted_totals_match_declared_via_validator` fails, the regex calibration is off. Inspect the failure's `delta_in`/`delta_out`, look at the actual statement layout, and tighten the row regex or the totals labels until validation passes. **Do not lower TOLERANCE in `statement_validator.py` to make tests pass — that defeats the integrity check.**
+If `test_extracted_totals_match_declared_via_validator` fails: inspect the actual ICICI statement text (`pdfplumber.open(...).pages[0].extract_text()`) and adjust `TOTAL_SPENDS_RE` / `TOTAL_CREDITS_RE` to match the real labels. **Do not lower TOLERANCE in `statement_validator.py` — that defeats the integrity check.**
 
-If `test_parse_returns_nonempty_parseresult` returns 0 rows, the row regex isn't matching. Print a few lines from the PDF to see what format they actually have, and adjust `ROW_RE`.
-
-- [ ] **Step 4.5: Lint, typecheck, full suite**
+- [ ] **Step 3.5: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
 
-- [ ] **Step 4.6: Commit**
+- [ ] **Step 3.6: Commit**
 
 ```bash
-git add skills/finance/ingestion/parsers/icici_cc.py tests/test_icici_cc_parser.py
-git commit -m "feat(parsers): ICICI CC deterministic parser (Week 2 Task 4)"
+git add skills/finance/ingestion/parsers/icici_cc.py skills/finance/ingestion/parsers/__init__.py tests/test_icici_cc_parser.py
+git commit -m "feat(parsers): ICICI CC deterministic PDF parser (Week 2 Task 3)"
 ```
 
 ---
 
-## Task 5: AMEX CC parser (LLM)
+## Task 4: AMEX CC parser (deterministic XLSX)
 
 **Files:**
 - Create: `skills/finance/ingestion/parsers/amex_cc.py`
 - Test: `tests/test_amex_cc_parser.py`
 
-- [ ] **Step 5.1: Write failing tests (mocked LLM)**
+The parser is calibrated against `tests/golden_fixtures/amex_sample.xlsx`. Tests skip when fixture absent. Some unit tests use canned `pd.DataFrame` inputs and don't need the fixture.
+
+- [ ] **Step 4.1: Write tests**
 
 ```python
 # tests/test_amex_cc_parser.py
-import json
-from datetime import date
+from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+import pandas as pd
 import pytest
+
+FIXTURE = Path(__file__).parent / "golden_fixtures" / "amex_sample.xlsx"
 
 
 def test_amex_parser_version():
     from skills.finance.ingestion.parsers.amex_cc import __parser_version__
-    assert __parser_version__ == "amex-cc-llm/v1"
+    assert __parser_version__ == "amex-cc-xlsx/v1"
 
 
-def test_amex_parse_normal_response():
-    """Mocked llm() returns canned JSON; parser should produce well-formed rows."""
+def test_find_header_row_canonical_layout():
+    """Synthetic DF: known column set on row 0."""
+    from skills.finance.ingestion.parsers.amex_cc import find_header_row
+    df = pd.DataFrame([
+        ["Date", "Description", "Amount"],
+        ["15/05/2026", "SWIGGY", 350.00],
+        ["20/05/2026", "BLINKIT", 1200.00],
+    ])
+    idx, mapping = find_header_row(df)
+    assert idx == 0
+    assert "date" in mapping and "description" in mapping and "amount" in mapping
+
+
+def test_find_header_row_offset_layout():
+    """AMEX exports often have a few preamble rows before the headers."""
+    from skills.finance.ingestion.parsers.amex_cc import find_header_row
+    df = pd.DataFrame([
+        ["AMEX Statement", None, None],
+        ["Customer: Rajat", None, None],
+        ["", None, None],
+        ["Date", "Description", "Amount"],
+        ["15/05/2026", "SWIGGY", 350.00],
+    ])
+    idx, mapping = find_header_row(df)
+    assert idx == 3
+
+
+def test_find_header_row_alternate_naming():
+    from skills.finance.ingestion.parsers.amex_cc import find_header_row
+    df = pd.DataFrame([
+        ["Transaction Date", "Description of Transaction", "Amount"],
+        ["15/05/2026", "SWIGGY", 350.00],
+    ])
+    idx, mapping = find_header_row(df)
+    assert idx == 0
+
+
+def test_find_header_row_no_match_raises_with_preview():
+    from skills.finance.ingestion.parsers.amex_cc import find_header_row, ParserError
+    df = pd.DataFrame([
+        ["Foo", "Bar", "Baz"],
+        ["X", "Y", "Z"],
+    ])
+    with pytest.raises(ParserError) as exc_info:
+        find_header_row(df)
+    assert "Foo" in str(exc_info.value) or "actual headers" in str(exc_info.value).lower()
+
+
+def test_amex_amount_signed_convention_charges_become_out():
+    """AMEX exports with signed amounts: positive=charge (out), negative=credit (in)."""
+    from skills.finance.ingestion.parsers.amex_cc import _row_from_signed_amount
+    row = _row_from_signed_amount(
+        date_str="15/05/2026", description="SWIGGY", amount_value=350.00, ordinal=1,
+    )
+    assert row.amount == Decimal("350.00")
+    assert row.direction == "out"
+
+    refund = _row_from_signed_amount(
+        date_str="20/05/2026", description="REFUND ZOMATO", amount_value=-150.00, ordinal=2,
+    )
+    assert refund.amount == Decimal("150.00")
+    assert refund.direction == "in"
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="AMEX golden fixture not present")
+def test_parse_real_amex_xlsx_returns_nonempty_parseresult():
     from skills.finance.ingestion.parsers.amex_cc import parse
+    result = parse(FIXTURE)
+    assert len(result.rows) > 0
+    assert result.parser_version == "amex-cc-xlsx/v1"
+    assert len(result.pdf_content_hash) == 64
 
-    canned_response_json = json.dumps({
-        "rows": [
-            {"txn_date": "2026-05-15", "amount": "3400.00", "direction": "out",
-             "raw_merchant": "SWIGGY"},
-            {"txn_date": "2026-05-20", "amount": "1200.00", "direction": "out",
-             "raw_merchant": "BLINKIT"},
-            {"txn_date": "2026-05-22", "amount": "500.00", "direction": "in",
-             "raw_merchant": "REFUND ZOMATO"},
-        ],
-        "total_spends": "4600.00",
-        "total_credits": "500.00",
-        "closing_balance": "4100.00",
-    })
 
-    fake_llm_resp = MagicMock(
-        choices=[MagicMock(message=MagicMock(content=canned_response_json))]
+@pytest.mark.skipif(not FIXTURE.exists(), reason="AMEX golden fixture not present")
+def test_amex_parsed_row_fields_well_formed():
+    from skills.finance.ingestion.parsers.amex_cc import parse
+    result = parse(FIXTURE)
+    for row in result.rows:
+        assert row.amount > Decimal("0")
+        assert row.direction in ("in", "out")
+        assert row.raw_merchant.strip()
+        assert row.source_row_ordinal >= 1
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="AMEX golden fixture not present")
+def test_amex_ordinals_contiguous_1_to_N():
+    from skills.finance.ingestion.parsers.amex_cc import parse
+    result = parse(FIXTURE)
+    ordinals = [r.source_row_ordinal for r in result.rows]
+    assert ordinals == list(range(1, len(result.rows) + 1))
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="AMEX golden fixture not present")
+def test_amex_extracted_totals_pass_validator():
+    """Whether declared totals come from a footer row or are derived from row sums,
+    validator should pass on a real fixture."""
+    from skills.finance.ingestion.parsers.amex_cc import parse
+    from skills.finance.ingestion.statement_validator import validate
+    result = parse(FIXTURE)
+    val = validate(result)
+    assert val.ok, (
+        f"AMEX validator failed: delta_in={val.delta_in}, delta_out={val.delta_out}. "
+        f"If a footer Total row exists in the fixture, parser regex needs adjustment. "
+        f"If it doesn't, parser should fall back to row-sum-derived totals."
     )
-
-    with patch("skills.finance.ingestion.parsers.amex_cc.llm",
-               return_value=fake_llm_resp), \
-         patch("skills.finance.ingestion.parsers.amex_cc.pikepdf.open"), \
-         patch("skills.finance.ingestion.parsers.amex_cc.convert_from_path",
-               return_value=[MagicMock(), MagicMock()]), \
-         patch("skills.finance.ingestion.parsers.amex_cc._image_to_b64",
-               return_value="data:image/png;base64,xxx"), \
-         patch("skills.finance.ingestion.parsers.amex_cc._sha256_file",
-               return_value="a" * 64):
-        result = parse(Path("/fake/path.pdf"), password="x")
-
-    assert len(result.rows) == 3
-    assert result.rows[0].txn_date == date(2026, 5, 15)
-    assert result.rows[0].amount == Decimal("3400.00")
-    assert result.rows[0].direction == "out"
-    assert result.rows[0].raw_merchant == "SWIGGY"
-    assert result.rows[2].direction == "in"
-    assert result.declared_totals["total_spends"] == Decimal("4600.00")
-    assert result.declared_totals["total_credits"] == Decimal("500.00")
-    assert result.parser_version == "amex-cc-llm/v1"
-
-
-def test_amex_parse_invalid_json_raises():
-    """If llm returns malformed JSON, parser raises ParserError."""
-    from skills.finance.ingestion.parsers.amex_cc import parse, ParserError
-
-    fake_llm_resp = MagicMock(
-        choices=[MagicMock(message=MagicMock(content="this is not json"))]
-    )
-
-    with patch("skills.finance.ingestion.parsers.amex_cc.llm",
-               return_value=fake_llm_resp), \
-         patch("skills.finance.ingestion.parsers.amex_cc.pikepdf.open"), \
-         patch("skills.finance.ingestion.parsers.amex_cc.convert_from_path",
-               return_value=[MagicMock()]), \
-         patch("skills.finance.ingestion.parsers.amex_cc._image_to_b64",
-               return_value="data:image/png;base64,xxx"), \
-         patch("skills.finance.ingestion.parsers.amex_cc._sha256_file",
-               return_value="b" * 64):
-        with pytest.raises(ParserError):
-            parse(Path("/fake/path.pdf"), password="x")
-
-
-def test_amex_parse_schema_violation_raises():
-    """If llm returns JSON missing required fields, parser raises ParserError."""
-    from skills.finance.ingestion.parsers.amex_cc import parse, ParserError
-
-    bad_json = json.dumps({
-        "rows": [{"txn_date": "2026-05-15", "amount": "100.00"}],  # missing direction, raw_merchant
-        "total_spends": "100.00",
-        "total_credits": "0.00",
-    })
-
-    fake_llm_resp = MagicMock(
-        choices=[MagicMock(message=MagicMock(content=bad_json))]
-    )
-
-    with patch("skills.finance.ingestion.parsers.amex_cc.llm",
-               return_value=fake_llm_resp), \
-         patch("skills.finance.ingestion.parsers.amex_cc.pikepdf.open"), \
-         patch("skills.finance.ingestion.parsers.amex_cc.convert_from_path",
-               return_value=[MagicMock()]), \
-         patch("skills.finance.ingestion.parsers.amex_cc._image_to_b64",
-               return_value="data:image/png;base64,xxx"), \
-         patch("skills.finance.ingestion.parsers.amex_cc._sha256_file",
-               return_value="c" * 64):
-        with pytest.raises(ParserError):
-            parse(Path("/fake/path.pdf"), password="x")
 ```
 
-- [ ] **Step 5.2: Run tests, verify they fail (no module yet)**
+- [ ] **Step 4.2: Run tests, verify failures**
 
 ```bash
 pytest tests/test_amex_cc_parser.py -v
 ```
-Expected: 4 errors (ModuleNotFoundError).
+Expected: errors / failures (no module yet).
 
-- [ ] **Step 5.3: Implement `amex_cc.py`**
+- [ ] **Step 4.3: Implement `amex_cc.py`**
 
 ```python
 # skills/finance/ingestion/parsers/amex_cc.py
-"""AMEX CC PDF statement parser — LLM via Gemini Flash vision.
+"""AMEX CC XLSX statement parser — deterministic.
 
-AMEX has no good OSS deterministic parser (per github_research_results.md §1).
-We rasterize each page to PNG, send via the `pdf_extraction` LiteLLM task with
-a Pydantic-enforced schema, parse the structured response.
+AMEX's MyStatement portal exports an unencrypted .xlsx file. We use
+pandas.read_excel + structured-cell extraction. No LLM in path.
 
-Total cost per statement: ~$0.005-0.01 on Gemini Flash free tier.
+KNOWN_COLUMN_SETS lists the layouts we've seen. If a real export uses
+different headers, find_header_row raises ParserError with the actual
+headers in the message — extend KNOWN_COLUMN_SETS and re-run.
+
+Known weakness: AMEX exports may not include a "Total" / "Statement Total"
+footer row. When absent, declared_totals is derived from row sums and
+the validator passes tautologically. Logged as a warning. See spec §6.3.
 """
 from __future__ import annotations
-import base64
 import hashlib
-import io
-import tempfile
-from datetime import date
+import logging
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-import pikepdf
-from pdf2image import convert_from_path
-from pydantic import BaseModel, ValidationError
+import pandas as pd
 
 from skills.finance.ingestion._common import ParsedRow, ParseResult
-from skills.finance.lib.llm import llm
 
-__parser_version__ = "amex-cc-llm/v1"
+logger = logging.getLogger(__name__)
+
+# CLAUDE.md invariant #4: manually curated.
+__parser_version__ = "amex-cc-xlsx/v1"
 
 
 class ParserError(Exception):
-    """Raised when the LLM response can't be parsed into the expected schema."""
+    """Raised when XLSX header detection fails or row parsing breaks."""
 
 
-class _LLMRow(BaseModel):
-    txn_date: date
-    amount: Decimal
-    direction: Literal["in", "out"]
-    raw_merchant: str
+# Each entry maps semantic field → list of accepted column header variants
+# (case-insensitive, whitespace-tolerant). The first set with all three
+# required keys (date, description, amount-or-debit-credit-pair) wins.
+KNOWN_COLUMN_SETS: list[dict[str, list[str]]] = [
+    # India MyStatement, signed-amount layout
+    {
+        "date": ["Date", "Transaction Date"],
+        "description": ["Description", "Description of Transaction", "Details"],
+        "amount": ["Amount"],
+    },
+    # Split debit/credit columns variant
+    {
+        "date": ["Date", "Transaction Date"],
+        "description": ["Description", "Description of Transaction", "Details"],
+        "debit": ["Charges", "Debit"],
+        "credit": ["Credits", "Credit"],
+    },
+]
 
 
-class _LLMStatement(BaseModel):
-    rows: list[_LLMRow]
-    total_spends: Decimal
-    total_credits: Decimal
-    closing_balance: Decimal | None = None
+def _normalize_header(s) -> str:
+    if pd.isna(s):
+        return ""
+    return str(s).strip().lower()
 
 
-_SYSTEM_PROMPT = """You are a precise PDF extractor for AMEX credit card statements. \
-Extract every transaction row and the declared statement totals. Output strict JSON \
-matching the schema. Do not include any prose, markdown, or commentary — JSON only."""
+def find_header_row(df: pd.DataFrame) -> tuple[int, dict[str, str]]:
+    """Walk the first 30 rows. For each, check if the values match any
+    KNOWN_COLUMN_SETS entry. Return (row_index, mapping from semantic_key → real_column_name).
 
-_USER_PROMPT = """Extract all transactions from these statement page images. For each row:
-- txn_date: ISO format YYYY-MM-DD
-- amount: positive decimal string (no currency symbol, no thousand separators)
-- direction: "out" for charges/debits, "in" for refunds/credits/payments received
-- raw_merchant: the merchant or description text as it appears on the statement
+    Raises ParserError with a preview of the first 10 rows if no match found."""
+    max_rows = min(30, len(df))
+    for i in range(max_rows):
+        row_values = [_normalize_header(v) for v in df.iloc[i].values]
+        for column_set in KNOWN_COLUMN_SETS:
+            mapping: dict[str, str] = {}
+            all_found = True
+            for semantic_key, accepted in column_set.items():
+                accepted_lower = [a.lower() for a in accepted]
+                match_idx = next(
+                    (j for j, v in enumerate(row_values) if v in accepted_lower),
+                    None,
+                )
+                if match_idx is None:
+                    all_found = False
+                    break
+                # Map semantic_key to the column index → caller uses .iloc[:, idx]
+                mapping[semantic_key] = str(match_idx)
+            if all_found:
+                return i, mapping
+    # No match found — surface real headers
+    preview_rows = df.head(10).values.tolist()
+    raise ParserError(
+        f"AMEX header row not detected in first {max_rows} rows. "
+        f"None of KNOWN_COLUMN_SETS matched. "
+        f"First 10 rows preview: {preview_rows}. "
+        f"Add a new entry to KNOWN_COLUMN_SETS based on the actual headers."
+    )
 
-Also extract the declared totals from the summary section:
-- total_spends: sum of all 'out' direction
-- total_credits: sum of all 'in' direction
-- closing_balance: the closing/total-amount-due if present, else null
 
-Output strict JSON matching this schema:
-{
-  "rows": [{"txn_date": "...", "amount": "...", "direction": "...", "raw_merchant": "..."}, ...],
-  "total_spends": "...",
-  "total_credits": "...",
-  "closing_balance": "..." | null
-}"""
+def _row_from_signed_amount(date_str: str, description: str,
+                            amount_value, ordinal: int) -> ParsedRow:
+    """AMEX signed-amount convention: positive = charge (out), negative = credit (in)."""
+    val = Decimal(str(amount_value))
+    return ParsedRow(
+        txn_date=_parse_date(date_str),
+        amount=abs(val),
+        direction="out" if val > 0 else "in",
+        raw_merchant=str(description).strip(),
+        source_row_ordinal=ordinal,
+    )
+
+
+def _row_from_split(date_str: str, description: str, debit_value, credit_value,
+                    ordinal: int) -> ParsedRow:
+    """Split debit/credit columns — exactly one should be non-NaN."""
+    if pd.notna(debit_value) and Decimal(str(debit_value)) != 0:
+        return ParsedRow(
+            txn_date=_parse_date(date_str),
+            amount=abs(Decimal(str(debit_value))),
+            direction="out",
+            raw_merchant=str(description).strip(),
+            source_row_ordinal=ordinal,
+        )
+    if pd.notna(credit_value) and Decimal(str(credit_value)) != 0:
+        return ParsedRow(
+            txn_date=_parse_date(date_str),
+            amount=abs(Decimal(str(credit_value))),
+            direction="in",
+            raw_merchant=str(description).strip(),
+            source_row_ordinal=ordinal,
+        )
+    raise ParserError(
+        f"Row at ordinal {ordinal} has no debit OR credit value; cannot determine direction"
+    )
+
+
+def _parse_date(s) -> date:
+    """AMEX India: DD/MM/YYYY. Be permissive — pandas may have already converted to Timestamp."""
+    if isinstance(s, datetime):
+        return s.date()
+    if isinstance(s, date):
+        return s
+    s = str(s).strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    raise ParserError(f"Could not parse date string: {s!r}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -1082,95 +1040,154 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _image_to_b64(img) -> str:
-    """PIL Image → base64 data URL (PNG)."""
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+def _find_total_row(df: pd.DataFrame, header_idx: int, desc_col_idx: int,
+                    amount_col_idx: int) -> Decimal | None:
+    """Search rows below the data band for a 'Total' / 'Statement Total' summary row.
+    Returns the amount, or None if not found."""
+    for i in range(header_idx + 1, len(df)):
+        cell = df.iloc[i, desc_col_idx]
+        if pd.isna(cell):
+            continue
+        if "total" in str(cell).strip().lower():
+            amt = df.iloc[i, amount_col_idx]
+            if pd.notna(amt):
+                try:
+                    return abs(Decimal(str(amt)))
+                except Exception:
+                    continue
+    return None
 
 
-def parse(pdf_path: Path, password: str) -> ParseResult:
-    """Decrypt the AMEX CC statement, rasterize, send to Gemini Flash, parse."""
-    pdf_path = Path(pdf_path)
-    pdf_content_hash = _sha256_file(pdf_path)
+def parse(xlsx_path: Path, password: str | None = None) -> ParseResult:
+    """Read AMEX XLSX, extract rows + declared totals.
 
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-        with pikepdf.open(pdf_path, password=password) as src:
-            src.save(tmp.name)
+    `password` parameter is accepted for parser-interface uniformity but
+    ignored — AMEX XLSX is unencrypted in V1."""
+    xlsx_path = Path(xlsx_path)
+    pdf_content_hash = _sha256_file(xlsx_path)
 
-        page_images = convert_from_path(tmp.name)
-        b64_images = [_image_to_b64(img) for img in page_images]
+    df = pd.read_excel(xlsx_path, engine="openpyxl", header=None)
+    header_idx, mapping = find_header_row(df)
 
-    resp = llm(
-        "pdf_extraction",
-        system=_SYSTEM_PROMPT,
-        prompt=_USER_PROMPT,
-        images=b64_images,
-    )
+    rows: list[ParsedRow] = []
+    ordinal = 1
+    desc_col_idx = int(mapping["description"])
 
-    raw_content = resp.choices[0].message.content
-    try:
-        parsed = _LLMStatement.model_validate_json(raw_content)
-    except ValidationError as e:
-        raise ParserError(f"LLM response failed schema validation: {e}") from e
-    except Exception as e:
-        raise ParserError(f"LLM response not valid JSON: {e}") from e
+    if "amount" in mapping:
+        amount_col_idx = int(mapping["amount"])
+        date_col_idx = int(mapping["date"])
+        for i in range(header_idx + 1, len(df)):
+            row = df.iloc[i]
+            d, desc, amt = row.iloc[date_col_idx], row.iloc[desc_col_idx], row.iloc[amount_col_idx]
+            if pd.isna(d) or pd.isna(desc) or pd.isna(amt):
+                # Skip blank / separator rows. Footer total rows also fall here when
+                # date is missing; we extract them separately below.
+                continue
+            # Skip 'Total' rows that happen to have all three cells filled
+            if "total" in str(desc).strip().lower():
+                continue
+            try:
+                rows.append(_row_from_signed_amount(str(d), str(desc), amt, ordinal))
+                ordinal += 1
+            except ParserError:
+                # Skip rows that fail individual parsing; log it
+                logger.warning("skipping unparseable row at index %d: %r", i, row.to_list())
+    else:
+        # Split debit/credit layout
+        debit_col_idx = int(mapping["debit"])
+        credit_col_idx = int(mapping["credit"])
+        date_col_idx = int(mapping["date"])
+        for i in range(header_idx + 1, len(df)):
+            row = df.iloc[i]
+            d, desc = row.iloc[date_col_idx], row.iloc[desc_col_idx]
+            debit, credit = row.iloc[debit_col_idx], row.iloc[credit_col_idx]
+            if pd.isna(d) or pd.isna(desc):
+                continue
+            if pd.isna(debit) and pd.isna(credit):
+                continue
+            if "total" in str(desc).strip().lower():
+                continue
+            try:
+                rows.append(_row_from_split(str(d), str(desc), debit, credit, ordinal))
+                ordinal += 1
+            except ParserError:
+                logger.warning("skipping unparseable row at index %d: %r", i, row.to_list())
 
-    rows: list[ParsedRow] = [
-        ParsedRow(
-            txn_date=r.txn_date,
-            amount=r.amount,
-            direction=r.direction,
-            raw_merchant=r.raw_merchant.strip(),
-            source_row_ordinal=i,
+    # Declared totals
+    declared_total_spends: Decimal | None = None
+    if "amount" in mapping:
+        declared_total_spends = _find_total_row(
+            df, header_idx, desc_col_idx, int(mapping["amount"]),
         )
-        for i, r in enumerate(parsed.rows, start=1)
-    ]
+
+    if declared_total_spends is None:
+        # Fall back to row sums — validator will pass tautologically. Logged.
+        logger.warning(
+            "AMEX XLSX has no 'Total' row; deriving declared totals from row sums "
+            "(validator will pass tautologically; success message annotates this)"
+        )
+        declared_total_spends = sum(
+            (r.amount for r in rows if r.direction == "out"), Decimal("0")
+        )
+        declared_total_credits = sum(
+            (r.amount for r in rows if r.direction == "in"), Decimal("0")
+        )
+        declared_totals = {
+            "total_spends": declared_total_spends,
+            "total_credits": declared_total_credits,
+            "closing_balance": None,
+            "_derived_from_rows": True,  # flag picked up by pipeline for annotation
+        }
+    else:
+        declared_total_credits = Decimal("0")  # split layouts may add a separate credit total
+        declared_totals = {
+            "total_spends": declared_total_spends,
+            "total_credits": declared_total_credits,
+            "closing_balance": None,
+            "_derived_from_rows": False,
+        }
 
     return ParseResult(
         rows=rows,
-        declared_totals={
-            "total_spends": parsed.total_spends,
-            "total_credits": parsed.total_credits,
-            "closing_balance": parsed.closing_balance,
-        },
+        declared_totals=declared_totals,
         pdf_content_hash=pdf_content_hash,
         parser_version=__parser_version__,
     )
 ```
 
-- [ ] **Step 5.4: Run tests, verify all pass**
+- [ ] **Step 4.4: Run tests; calibrate KNOWN_COLUMN_SETS if needed**
 
 ```bash
 pytest tests/test_amex_cc_parser.py -v
 ```
-Expected: 4 passed.
+Expected: 9 passed (or 5 + 4 skipped if AMEX fixture absent — but Preconditions required it present).
 
-- [ ] **Step 5.5: Lint, typecheck, full suite**
+If `find_header_row` fails on the real fixture, the `ParserError` message includes the actual headers. Add a 4th entry to `KNOWN_COLUMN_SETS` based on those headers, re-run.
+
+- [ ] **Step 4.5: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
 
-- [ ] **Step 5.6: Commit**
+- [ ] **Step 4.6: Commit**
 
 ```bash
 git add skills/finance/ingestion/parsers/amex_cc.py tests/test_amex_cc_parser.py
-git commit -m "feat(parsers): AMEX CC LLM-based parser via Gemini Flash + Pydantic schema"
+git commit -m "feat(parsers): AMEX CC deterministic XLSX parser via pandas.read_excel"
 ```
 
 ---
 
-## Task 6: `pipeline.py` — orchestrator
+## Task 5: `pipeline.py` — orchestrator
 
 **Files:**
 - Create: `skills/finance/ingestion/pipeline.py`
 - Test: `tests/test_pipeline.py`
 
-This task uses the supabase-py upsert behavior verified in Task 0.2. If Task 0 found `upsert(..., on_conflict='import_hash', ignore_duplicates=True)` doesn't work as expected, **substitute the per-row insert + try/except fallback in Step 6.3 before writing.**
+This task uses the supabase-py upsert behavior verified in Task 0.2. If Task 0 found `upsert(..., on_conflict='import_hash', ignore_duplicates=True)` doesn't work as expected, **substitute the per-row insert + try/except fallback before writing.**
 
-- [ ] **Step 6.1: Write failing tests (mocked Supabase)**
+- [ ] **Step 5.1: Write failing tests (mocked Supabase)**
 
 ```python
 # tests/test_pipeline.py
@@ -1194,7 +1211,7 @@ def _make_pr(rows, total_spends, total_credits, parser_version="icici-cc/v1"):
             "total_credits": Decimal(str(total_credits)),
             "closing_balance": None,
         },
-        pdf_content_hash="abc" * 21 + "z",  # 64 chars
+        pdf_content_hash="abc" * 21 + "z",
         parser_version=parser_version,
     )
 
@@ -1209,55 +1226,7 @@ def _row(amount, ordinal, direction="out", merchant="test"):
     )
 
 
-def test_pipeline_validation_failure_no_insert():
-    """Totals mismatch → no transactions inserted, ingestion_log gets total_check_failed."""
-    from skills.finance.ingestion.pipeline import ingest
-
-    # Extracted ₹150 vs declared ₹200 → off by ₹50, fails validation
-    pr = _make_pr([_row(100, 1), _row(50, 2)], 200, 0)
-    source = SourceMeta(source="manual_pdf", source_ref="test.pdf")
-
-    txn_inserts = []
-    log_inserts = []
-
-    def mock_insert(self, table_name):
-        builder = MagicMock()
-        if table_name == "transactions":
-            builder.upsert = lambda rows, **kw: _record(txn_inserts, rows, builder)
-            builder.insert = lambda rows: _record(txn_inserts, rows, builder)
-        elif table_name == "ingestion_log":
-            builder.insert = lambda row: _record(log_inserts, row, builder)
-        return builder
-
-    def _record(target, payload, builder):
-        target.append(payload)
-        builder.execute = lambda: MagicMock(data=payload if isinstance(payload, list) else [payload])
-        return builder
-
-    fake_client = MagicMock()
-    fake_client.table.side_effect = lambda t: mock_insert(fake_client, t)
-
-    with patch("skills.finance.ingestion.pipeline.service_client", return_value=fake_client):
-        result = asyncio.run(ingest(pr, ICICI_CC_ACCOUNT_ID, source))
-
-    # transactions.upsert / .insert should NOT have been called
-    assert len(txn_inserts) == 0, f"Expected no transactions insert, got {txn_inserts}"
-    # ingestion_log should have one entry with status='total_check_failed'
-    assert len(log_inserts) == 1
-    assert log_inserts[0]["status"] == "total_check_failed"
-    assert result["status"] == "total_check_failed"
-
-
-def test_pipeline_success_inserts_rows_and_logs():
-    """Validation passes → all rows inserted, ingestion_log gets status='success'."""
-    from skills.finance.ingestion.pipeline import ingest
-
-    pr = _make_pr([_row(100, 1, merchant="SWIGGY"), _row(50, 2, merchant="BLINKIT")], 150, 0)
-    source = SourceMeta(source="manual_pdf", source_ref="test.pdf")
-
-    txn_inserts = []
-    log_inserts = []
-
+def _make_table_mock(txn_inserts, log_inserts):
     def mock_table(name):
         builder = MagicMock()
         if name == "transactions":
@@ -1273,9 +1242,38 @@ def test_pipeline_success_inserts_rows_and_logs():
                 return builder
             builder.insert = _insert
         return builder
+    return mock_table
 
+
+def test_pipeline_validation_failure_no_insert():
+    """Totals mismatch → no transactions inserted, ingestion_log gets total_check_failed."""
+    from skills.finance.ingestion.pipeline import ingest
+
+    pr = _make_pr([_row(100, 1), _row(50, 2)], 200, 0)
+    source = SourceMeta(source="manual_pdf", source_ref="test.pdf")
+
+    txn_inserts, log_inserts = [], []
     fake_client = MagicMock()
-    fake_client.table.side_effect = mock_table
+    fake_client.table.side_effect = _make_table_mock(txn_inserts, log_inserts)
+
+    with patch("skills.finance.ingestion.pipeline.service_client", return_value=fake_client):
+        result = asyncio.run(ingest(pr, ICICI_CC_ACCOUNT_ID, source))
+
+    assert len(txn_inserts) == 0
+    assert len(log_inserts) == 1
+    assert log_inserts[0]["status"] == "total_check_failed"
+    assert result["status"] == "total_check_failed"
+
+
+def test_pipeline_success_inserts_rows_and_logs():
+    from skills.finance.ingestion.pipeline import ingest
+
+    pr = _make_pr([_row(100, 1, merchant="SWIGGY"), _row(50, 2, merchant="BLINKIT")], 150, 0)
+    source = SourceMeta(source="manual_pdf", source_ref="test.pdf")
+
+    txn_inserts, log_inserts = [], []
+    fake_client = MagicMock()
+    fake_client.table.side_effect = _make_table_mock(txn_inserts, log_inserts)
 
     with patch("skills.finance.ingestion.pipeline.service_client", return_value=fake_client):
         result = asyncio.run(ingest(pr, ICICI_CC_ACCOUNT_ID, source))
@@ -1284,55 +1282,31 @@ def test_pipeline_success_inserts_rows_and_logs():
     inserted = txn_inserts[0]
     assert len(inserted) == 2
     assert inserted[0]["raw_merchant"] == "SWIGGY"
-    # import_hash is computed; sanity-check it's a 64-char hex string
     assert len(inserted[0]["import_hash"]) == 64
-    # parser_version threaded in
     assert inserted[0]["parser_version"] == "icici-cc/v1"
     assert result["status"] == "success"
 
 
 def test_pipeline_import_hash_per_row_uses_mode_b():
-    """Verify pipeline calls import_hash_pdf with the right arguments."""
     from skills.finance.ingestion.pipeline import ingest
 
     pr = _make_pr([_row(350, 1, merchant="SWIGGY"), _row(350, 2, merchant="SWIGGY")], 700, 0)
     source = SourceMeta(source="manual_pdf", source_ref="test.pdf")
 
     captured_hashes = []
-
     def fake_import_hash_pdf(**kwargs):
         captured_hashes.append(kwargs)
-        return "h" * 64  # placeholder
+        return "h" * 64
 
-    txn_inserts = []
-    log_inserts = []
-
-    def mock_table(name):
-        builder = MagicMock()
-        if name == "transactions":
-            def _upsert(rows, **kw):
-                txn_inserts.append(rows)
-                builder.execute = lambda: MagicMock(data=rows)
-                return builder
-            builder.upsert = _upsert
-        elif name == "ingestion_log":
-            def _insert(row):
-                log_inserts.append(row)
-                builder.execute = lambda: MagicMock(data=[row])
-                return builder
-            builder.insert = _insert
-        return builder
-
+    txn_inserts, log_inserts = [], []
     fake_client = MagicMock()
-    fake_client.table.side_effect = mock_table
+    fake_client.table.side_effect = _make_table_mock(txn_inserts, log_inserts)
 
     with patch("skills.finance.ingestion.pipeline.service_client", return_value=fake_client), \
          patch("skills.finance.ingestion.pipeline.import_hash_pdf",
                side_effect=fake_import_hash_pdf):
         asyncio.run(ingest(pr, ICICI_CC_ACCOUNT_ID, source))
 
-    # Two rows = two hash calls. The Swiggy-Swiggy intra-PDF case must be disambiguated
-    # by source_row_ordinal in the hash inputs.
     assert len(captured_hashes) == 2
     assert captured_hashes[0]["source_row_ordinal"] == 1
     assert captured_hashes[1]["source_row_ordinal"] == 2
@@ -1340,25 +1314,27 @@ def test_pipeline_import_hash_per_row_uses_mode_b():
     assert captured_hashes[0]["parser_version"] == "icici-cc/v1"
 ```
 
-- [ ] **Step 6.2: Run tests, verify failures**
+- [ ] **Step 5.2: Run tests, verify failures**
 
 ```bash
 pytest tests/test_pipeline.py -v
 ```
 Expected: 3 errors (ModuleNotFoundError).
 
-- [ ] **Step 6.3: Implement `pipeline.py`**
+- [ ] **Step 5.3: Implement `pipeline.py`**
 
 ```python
 # skills/finance/ingestion/pipeline.py
 """Ingestion pipeline orchestrator.
 
 Runs: validate → compute Mode-B import_hash per row → upsert to transactions →
-log to ingestion_log → send Telegram summary. On totals failure, NO rows are
+log to ingestion_log → return status. On totals failure, NO rows are
 inserted (per spec §8 / PRD §18.4 — entire statement rejected).
+
+Caller (folder_watcher.dispatch_to_parser) handles the Telegram summary
+message after this returns.
 """
 from __future__ import annotations
-import asyncio
 import logging
 from typing import Any
 from uuid import UUID
@@ -1383,11 +1359,8 @@ def _build_insert_row(
     pr: ParseResult,
     source: SourceMeta,
 ) -> dict[str, Any]:
-    """Build a single transactions row dict for Supabase insert.
-
-    NB: normalized_description = raw_merchant in Week 2; merchant normalization
-    lands in Week 5 with a parser_version bump that forces re-ingest of the
-    affected rows."""
+    """NB: normalized_description = raw_merchant in Week 2; merchant normalization
+    lands in Week 5 with a parser_version bump that forces re-ingest of affected rows."""
     h = import_hash_pdf(
         account_id=str(account_id),
         txn_date=r.txn_date,
@@ -1444,6 +1417,8 @@ async def _log_success(
     rows_added: int,
 ) -> dict[str, Any]:
     status = "success" if rows_added > 0 else "skipped_duplicate"
+    derived = pr.declared_totals.get("_derived_from_rows", False)
+    error_msg = "declared totals derived from row sums (no Total row in source)" if derived else None
     log_row = {
         "source": source.source,
         "source_ref": source.source_ref,
@@ -1451,7 +1426,7 @@ async def _log_success(
         "rows_added": rows_added,
         "declared_total": str(val.declared_out),
         "extracted_total": str(val.extracted_out),
-        "error_msg": None,
+        "error_msg": error_msg,
     }
     await adb(
         lambda: service_client().table("ingestion_log").insert(log_row).execute()
@@ -1467,8 +1442,7 @@ async def ingest(
     """Orchestrate validate → upsert → log. Returns the ingestion_log row.
 
     Caller is responsible for sending the Telegram summary message; this fn
-    keeps the pipeline pure (no Telegram I/O). pipeline.ingest is the unit
-    that gets unit-tested with mocked service_client."""
+    keeps the pipeline pure (no Telegram I/O)."""
     val = validate(parse_result)
     if not val.ok:
         logger.warning(
@@ -1497,20 +1471,20 @@ async def ingest(
     return await _log_success(parse_result, source_meta, val, rows_added)
 ```
 
-- [ ] **Step 6.4: Run tests, verify all pass**
+- [ ] **Step 5.4: Run tests, verify all pass**
 
 ```bash
 pytest tests/test_pipeline.py -v
 ```
 Expected: 3 passed.
 
-- [ ] **Step 6.5: Lint, typecheck, full suite**
+- [ ] **Step 5.5: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
 
-- [ ] **Step 6.6: Commit**
+- [ ] **Step 5.6: Commit**
 
 ```bash
 git add skills/finance/ingestion/pipeline.py tests/test_pipeline.py
@@ -1519,441 +1493,21 @@ git commit -m "feat(ingestion): pipeline orchestrator (validate → import_hash 
 
 ---
 
-## Task 7: `calibration.py` — AMEX dual-model diff
+## Task 6: `folder_watcher.py`
 
-**Files:**
-- Create: `skills/finance/ingestion/calibration.py`
-- Test: `tests/test_calibration.py`
-
-- [ ] **Step 7.1: Write failing tests**
-
-```python
-# tests/test_calibration.py
-from datetime import date
-from decimal import Decimal
-from unittest.mock import MagicMock
-
-from skills.finance.ingestion._common import ParsedRow, ParseResult
-
-
-def _row(amount, ordinal, direction="out", merchant="test", txn_date=None):
-    return ParsedRow(
-        txn_date=txn_date or date(2026, 5, 15),
-        amount=Decimal(str(amount)),
-        direction=direction,
-        raw_merchant=merchant,
-        source_row_ordinal=ordinal,
-    )
-
-
-def _make_pr(rows, parser_version="amex-cc-llm/v1"):
-    return ParseResult(
-        rows=rows, declared_totals={"total_spends": Decimal("0"), "total_credits": Decimal("0"),
-                                    "closing_balance": None},
-        pdf_content_hash="x" * 64, parser_version=parser_version,
-    )
-
-
-def test_diff_perfect_agreement_no_disagreements():
-    from skills.finance.ingestion.calibration import diff_extractions
-    a = _make_pr([_row(100, 1, merchant="SWIGGY"), _row(50, 2, merchant="BLINKIT")])
-    b = _make_pr([_row(100, 1, merchant="SWIGGY"), _row(50, 2, merchant="BLINKIT")])
-    disagreements = diff_extractions(a, b)
-    assert disagreements == []
-
-
-def test_diff_merchant_differs_one_disagreement():
-    from skills.finance.ingestion.calibration import diff_extractions
-    a = _make_pr([_row(100, 1, merchant="SWIGGY"), _row(50, 2, merchant="BLINKIT")])
-    b = _make_pr([_row(100, 1, merchant="ZOMATO"), _row(50, 2, merchant="BLINKIT")])
-    disagreements = diff_extractions(a, b)
-    assert len(disagreements) == 1
-    assert disagreements[0].kind == "merchant_differs"
-    assert disagreements[0].a_row.raw_merchant == "SWIGGY"
-    assert disagreements[0].b_row.raw_merchant == "ZOMATO"
-
-
-def test_diff_one_side_missing_row():
-    from skills.finance.ingestion.calibration import diff_extractions
-    a = _make_pr([_row(100, 1, merchant="SWIGGY"), _row(50, 2, merchant="BLINKIT")])
-    b = _make_pr([_row(100, 1, merchant="SWIGGY")])  # missing the second row
-    disagreements = diff_extractions(a, b)
-    assert len(disagreements) == 1
-    assert disagreements[0].kind == "missing_in_b"
-
-
-def test_diff_multiple_disagreements():
-    from skills.finance.ingestion.calibration import diff_extractions
-    a = _make_pr([_row(100, 1, merchant="A"), _row(50, 2, merchant="B"), _row(30, 3, merchant="C")])
-    b = _make_pr([_row(100, 1, merchant="A"), _row(50, 2, merchant="X")])  # different B, missing C
-    disagreements = diff_extractions(a, b)
-    assert len(disagreements) == 2
-    kinds = sorted(d.kind for d in disagreements)
-    assert kinds == ["merchant_differs", "missing_in_b"]
-
-
-def test_cost_cap_check_under_budget():
-    from skills.finance.ingestion.calibration import calibration_cost_so_far_inr
-    fake_client = MagicMock()
-    fake_client.table.return_value.select.return_value.gte.return_value.eq.return_value.execute.return_value = MagicMock(
-        data=[{"total_cost": 0.05}, {"total_cost": 0.03}]  # USD; cumulative 0.08
-    )
-    inr = calibration_cost_so_far_inr(client=fake_client, since_iso="2026-04-26T00:00:00Z")
-    # 0.08 USD × ~₹84/USD ≈ ₹6.72
-    assert Decimal("6") < inr < Decimal("8")
-
-
-def test_cost_cap_check_at_budget():
-    from skills.finance.ingestion.calibration import is_calibration_over_budget
-    assert is_calibration_over_budget(spent_inr=Decimal("199")) is False
-    assert is_calibration_over_budget(spent_inr=Decimal("200")) is True
-    assert is_calibration_over_budget(spent_inr=Decimal("250")) is True
-```
-
-- [ ] **Step 7.2: Run tests, verify failures**
-
-```bash
-pytest tests/test_calibration.py -v
-```
-Expected: 6 errors.
-
-- [ ] **Step 7.3: Implement `calibration.py`**
-
-```python
-# skills/finance/ingestion/calibration.py
-"""AMEX dual-model calibration — Month 1 only.
-
-Runs both Gemini Flash + Claude Haiku on the same AMEX statement, diffs the
-row sets, surfaces disagreements via Telegram for adjudication. Hard cost cap:
-₹200 across all AMEX calibration runs (spec §9.2).
-"""
-from __future__ import annotations
-import logging
-from dataclasses import dataclass
-from decimal import Decimal
-from typing import Any, Literal
-
-import litellm
-
-from skills.finance.ingestion._common import ParsedRow, ParseResult
-from skills.finance.lib.db import service_client
-
-logger = logging.getLogger(__name__)
-
-# ₹200 cap from PRD §18.4 + spec §9.2. Brainstorm Q4 locked this.
-CALIBRATION_BUDGET_INR: Decimal = Decimal("200")
-
-# USD → INR conversion for budget-comparison only. Approximate; exact rate
-# doesn't matter — we just want to detect "approaching cap" and bail.
-USD_TO_INR_APPROX: Decimal = Decimal("84")
-
-
-@dataclass(frozen=True)
-class Disagreement:
-    """A single point of disagreement between two parser extractions."""
-    kind: Literal["merchant_differs", "missing_in_a", "missing_in_b"]
-    a_row: ParsedRow | None
-    b_row: ParsedRow | None
-    join_key: tuple                       # (txn_date, amount, direction) for context
-
-
-def _row_key(r: ParsedRow) -> tuple:
-    return (r.txn_date, r.amount, r.direction)
-
-
-def diff_extractions(a: ParseResult, b: ParseResult) -> list[Disagreement]:
-    """Compare two ParseResults row-by-row.
-
-    Strategy: inner-join on (txn_date, amount, direction). Rows present in both
-    but with different `raw_merchant` are 'merchant_differs'. Rows present in
-    only one are 'missing_in_a' or 'missing_in_b'.
-    """
-    a_by_key: dict[tuple, ParsedRow] = {_row_key(r): r for r in a.rows}
-    b_by_key: dict[tuple, ParsedRow] = {_row_key(r): r for r in b.rows}
-
-    disagreements: list[Disagreement] = []
-
-    for key, a_row in a_by_key.items():
-        if key not in b_by_key:
-            disagreements.append(Disagreement(
-                kind="missing_in_b", a_row=a_row, b_row=None, join_key=key
-            ))
-        else:
-            b_row = b_by_key[key]
-            if a_row.raw_merchant.strip().lower() != b_row.raw_merchant.strip().lower():
-                disagreements.append(Disagreement(
-                    kind="merchant_differs", a_row=a_row, b_row=b_row, join_key=key
-                ))
-
-    for key, b_row in b_by_key.items():
-        if key not in a_by_key:
-            disagreements.append(Disagreement(
-                kind="missing_in_a", a_row=None, b_row=b_row, join_key=key
-            ))
-
-    return disagreements
-
-
-def calibration_cost_so_far_inr(
-    client=None,
-    since_iso: str = "2026-04-26T00:00:00Z",
-) -> Decimal:
-    """Sum total_cost from request_logs where metadata->>'task' = 'pdf_extraction'
-    and created_at >= since_iso. Returns INR (approximate, USD→INR×84)."""
-    c = client or service_client()
-    rows = (
-        c.table("request_logs")
-        .select("total_cost")
-        .gte("created_at", since_iso)
-        .eq("metadata->>task", "pdf_extraction")  # NB: PostgREST JSON op
-        .execute()
-    ).data or []
-    total_usd = sum(
-        (Decimal(str(r.get("total_cost") or 0)) for r in rows),
-        Decimal("0"),
-    )
-    return (total_usd * USD_TO_INR_APPROX).quantize(Decimal("0.01"))
-
-
-def is_calibration_over_budget(spent_inr: Decimal) -> bool:
-    return spent_inr >= CALIBRATION_BUDGET_INR
-
-
-async def calibrate_amex(
-    pdf_path,
-    password: str,
-    bot=None,                   # aiogram Bot for surfacing disagreements; None in tests
-    chat_id: str | None = None,
-) -> ParseResult:
-    """Run both Gemini Flash + Claude Haiku on the AMEX PDF; diff; surface
-    disagreements via Telegram for user adjudication; return the chosen rows
-    as a ParseResult.
-
-    Cost-cap guarded: if request_logs shows > ₹200 spent on pdf_extraction
-    since calibration-start, abort calibration and return the Gemini-Flash-only
-    extraction (logged + alerted)."""
-    spent = calibration_cost_so_far_inr()
-    if is_calibration_over_budget(spent):
-        logger.warning(
-            "calibration cost cap (₹%s) reached (spent ₹%s); falling back to Gemini-only",
-            CALIBRATION_BUDGET_INR, spent,
-        )
-        # Fall back to single-model extraction via the standard amex_cc parser.
-        from skills.finance.ingestion.parsers.amex_cc import parse as amex_parse
-        return amex_parse(pdf_path, password=password)
-
-    # Run both extractors. The standard parser uses gemini-flash via routing config;
-    # for the second pass, override the model to Claude Haiku.
-    from skills.finance.ingestion.parsers.amex_cc import parse as amex_parse_default
-    a = amex_parse_default(pdf_path, password=password)
-
-    # For Claude Haiku, temporarily swap the routing — minimal approach for V1:
-    # call litellm.completion directly with the same prompts but a different model.
-    # (A cleaner approach is to add a `task` parameter override to llm(); deferred
-    # to keep the surface area small. Document this trade-off.)
-    b = await _amex_parse_via_haiku(pdf_path, password=password)
-
-    disagreements = diff_extractions(a, b)
-    if not disagreements:
-        # Both extractors agree on every row — return either.
-        return a
-
-    if bot is None or chat_id is None:
-        # Test mode: no Telegram. Return `a` (Gemini) by default and log.
-        logger.info("calibrate_amex: %d disagreements, no bot — returning Gemini set", len(disagreements))
-        return a
-
-    # Production: surface each disagreement, await user response, build the chosen row set.
-    # Implementation deferred to Step 7.4 (the human-in-the-loop flow needs aiogram
-    # Update objects to receive replies; we'll wire it in step-by-step).
-    raise NotImplementedError(
-        "Telegram-driven adjudication is wired in Step 7.4 of Task 7. "
-        "Calling this in production before that step lands is a programmer error."
-    )
-
-
-async def _amex_parse_via_haiku(pdf_path, password: str) -> ParseResult:
-    """Helper: run the same AMEX extraction prompt but with Claude Haiku as the model.
-
-    This is the SECOND extraction in the dual-model calibration. Implementation
-    duplicates parsers/amex_cc.parse but uses litellm.completion directly with
-    model='anthropic/claude-haiku-4-5-20251001' rather than going through llm().
-    Kept as a private helper here (not in parsers/) because it's calibration-only
-    and should never be the default path."""
-    # ... implementation duplicates parsers/amex_cc.parse but with the Claude Haiku
-    # model. To keep the plan tight, we implement this in Step 7.4 alongside the
-    # Telegram adjudication flow.
-    raise NotImplementedError("Implemented in Step 7.4")
-```
-
-- [ ] **Step 7.4: Implement the Haiku helper + Telegram adjudication**
-
-Replace the two `NotImplementedError` placeholders with real implementations:
-
-```python
-# Append/replace inside calibration.py
-
-import base64
-import io
-import json
-import tempfile
-
-import litellm
-import pikepdf
-from pdf2image import convert_from_path
-from pydantic import ValidationError
-
-from skills.finance.ingestion.parsers.amex_cc import (
-    _LLMStatement,
-    _SYSTEM_PROMPT,
-    _USER_PROMPT,
-    _image_to_b64,
-    _sha256_file,
-    ParserError,
-    __parser_version__ as _AMEX_VERSION,
-)
-
-
-async def _amex_parse_via_haiku(pdf_path, password: str) -> ParseResult:
-    """Same prompts/schema as parsers/amex_cc.parse, but model = Claude Haiku."""
-    from pathlib import Path
-    pdf_path = Path(pdf_path)
-    pdf_content_hash = _sha256_file(pdf_path)
-
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-        with pikepdf.open(pdf_path, password=password) as src:
-            src.save(tmp.name)
-        page_images = convert_from_path(tmp.name)
-        b64_images = [_image_to_b64(img) for img in page_images]
-
-    content: list[dict] = [{"type": "text", "text": _USER_PROMPT}]
-    for img in b64_images:
-        content.append({"type": "image_url", "image_url": {"url": img}})
-
-    resp = litellm.completion(
-        model="anthropic/claude-haiku-4-5-20251001",
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": content},
-        ],
-        metadata={"task": "pdf_extraction", "calibration": "haiku"},
-    )
-
-    raw = resp.choices[0].message.content
-    try:
-        parsed = _LLMStatement.model_validate_json(raw)
-    except ValidationError as e:
-        raise ParserError(f"Haiku response failed schema validation: {e}") from e
-
-    rows = [
-        ParsedRow(
-            txn_date=r.txn_date,
-            amount=r.amount,
-            direction=r.direction,
-            raw_merchant=r.raw_merchant.strip(),
-            source_row_ordinal=i,
-        )
-        for i, r in enumerate(parsed.rows, start=1)
-    ]
-
-    return ParseResult(
-        rows=rows,
-        declared_totals={
-            "total_spends": parsed.total_spends,
-            "total_credits": parsed.total_credits,
-            "closing_balance": parsed.closing_balance,
-        },
-        pdf_content_hash=pdf_content_hash,
-        parser_version=f"{_AMEX_VERSION}-calibration-haiku",  # marker; not used as primary
-    )
-```
-
-For the Telegram adjudication flow inside `calibrate_amex`, this requires bidirectional bot communication (asking user, awaiting reply). For Week 2, implement a **simpler MVP**:
-
-```python
-# Replace the NotImplementedError block in calibrate_amex with:
-
-# Production path: surface a single combined message, log all disagreements,
-# default to Gemini's choices, but write to ingestion_log status='needs_review'
-# with the disagreements as JSON in error_msg. User reviews offline + corrects
-# specific rows post-ingest using Week 4's /categorize command.
-#
-# Reasoning: full inline-adjudication-via-Telegram requires per-disagreement
-# state management (FSM), which is its own subsystem. For Month 1's 2-3 AMEX
-# statements, the disagreement count is expected to be 0-3 per statement. Logging
-# them and letting Rajat fix them via /categorize (Week 4) is acceptable friction.
-# If volume turns out higher than expected, escalate.
-
-if bot is not None and chat_id is not None:
-    summary = (
-        f"🧪 AMEX CC calibration — {len(disagreements)} disagreement(s)\n\n"
-    )
-    for d in disagreements[:10]:  # cap at 10 lines per message; rare to exceed
-        if d.kind == "merchant_differs":
-            summary += (
-                f"• Row {d.a_row.source_row_ordinal} merchant differs:\n"
-                f"  Gemini → {d.a_row.raw_merchant}\n"
-                f"  Haiku  → {d.b_row.raw_merchant}\n"
-                f"  Date {d.a_row.txn_date}, ₹{d.a_row.amount}\n\n"
-            )
-        elif d.kind == "missing_in_b":
-            summary += (
-                f"• Row {d.a_row.source_row_ordinal} only in Gemini: "
-                f"{d.a_row.raw_merchant} ₹{d.a_row.amount}\n\n"
-            )
-        elif d.kind == "missing_in_a":
-            summary += (
-                f"• Row only in Haiku: "
-                f"{d.b_row.raw_merchant} ₹{d.b_row.amount}\n\n"
-            )
-    summary += (
-        "Defaulting to Gemini extraction. Use /categorize <txn_id> after ingest "
-        "(Week 4) to correct individual rows if needed."
-    )
-    await bot.send_message(chat_id=chat_id, text=summary)
-
-logger.info(
-    "calibrate_amex: %d disagreements logged; Gemini set used for ingest",
-    len(disagreements),
-)
-return a
-```
-
-- [ ] **Step 7.5: Run tests, verify all pass**
-
-```bash
-pytest tests/test_calibration.py -v
-```
-Expected: 6 passed.
-
-- [ ] **Step 7.6: Lint, typecheck, full suite**
-
-```bash
-make lint && make typecheck && make test
-```
-
-- [ ] **Step 7.7: Commit**
-
-```bash
-git add skills/finance/ingestion/calibration.py tests/test_calibration.py
-git commit -m "feat(ingestion): AMEX dual-model calibration with ₹200 cap and disagreement diff"
-```
-
----
-
-## Task 8: `folder_watcher.py`
+Watches `~/finance-inbox/` for both `*.pdf` AND `*.xlsx`; dispatches by extension + bank token.
 
 **Files:**
 - Create: `skills/finance/ingestion/folder_watcher.py`
 - Test: `tests/test_folder_watcher.py`
 
-- [ ] **Step 8.1: Write failing tests (mocked watchdog + filesystem)**
+- [ ] **Step 6.1: Write failing tests**
 
 ```python
 # tests/test_folder_watcher.py
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import pytest
 
 
@@ -1965,86 +1519,108 @@ def tmp_inbox(tmp_path):
 
 
 def test_dispatch_unknown_filename_renames_to_rejected(tmp_inbox):
-    from skills.finance.ingestion.folder_watcher import handle_new_pdf
+    from skills.finance.ingestion.folder_watcher import handle_new_file
     f = tmp_inbox / "random.pdf"
     f.write_bytes(b"%PDF-fake")
     with patch("skills.finance.ingestion.folder_watcher.send_alert") as mock_alert, \
          patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
-        asyncio.run(handle_new_pdf(f))
-    assert (tmp_inbox / "random.pdf.rejected.pdf").exists()
+        asyncio.run(handle_new_file(f))
+    assert (tmp_inbox / "random.pdf.rejected").exists()
     assert not f.exists()
     mock_dispatch.assert_not_called()
     mock_alert.assert_called_once()
 
 
-def test_dispatch_icici_filename_calls_parser(tmp_inbox):
-    from skills.finance.ingestion.folder_watcher import handle_new_pdf
+def test_dispatch_icici_pdf_calls_parser(tmp_inbox):
+    from skills.finance.ingestion.folder_watcher import handle_new_file
     f = tmp_inbox / "icici_cc_2026_05.pdf"
     f.write_bytes(b"%PDF-fake")
     with patch("skills.finance.ingestion.folder_watcher.password_lookup",
                return_value="testpass"), \
          patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
-        asyncio.run(handle_new_pdf(f))
+        asyncio.run(handle_new_file(f))
     mock_dispatch.assert_called_once()
-    call_args = mock_dispatch.call_args
-    assert call_args.kwargs["bank"] == "icici_cc"
-    assert call_args.kwargs["password"] == "testpass"
+    assert mock_dispatch.call_args.kwargs["bank"] == "icici_cc"
+    assert mock_dispatch.call_args.kwargs["password"] == "testpass"
 
 
-def test_dispatch_amex_filename_calls_parser(tmp_inbox):
-    from skills.finance.ingestion.folder_watcher import handle_new_pdf
-    f = tmp_inbox / "amex_cc_2026_05.pdf"
-    f.write_bytes(b"%PDF-fake")
-    with patch("skills.finance.ingestion.folder_watcher.password_lookup",
-               return_value="testpass"), \
-         patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
-        asyncio.run(handle_new_pdf(f))
+def test_dispatch_amex_xlsx_calls_parser_no_password(tmp_inbox):
+    from skills.finance.ingestion.folder_watcher import handle_new_file
+    f = tmp_inbox / "amex_cc_2026_05.xlsx"
+    f.write_bytes(b"PK\x03\x04fake")
+    with patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
+        asyncio.run(handle_new_file(f))
     mock_dispatch.assert_called_once()
     assert mock_dispatch.call_args.kwargs["bank"] == "amex_cc"
+    assert mock_dispatch.call_args.kwargs["password"] is None
+
+
+def test_amex_pdf_extension_mismatch_rejected(tmp_inbox):
+    """AMEX should be XLSX in V1; an AMEX PDF is a category mismatch."""
+    from skills.finance.ingestion.folder_watcher import handle_new_file
+    f = tmp_inbox / "amex_cc_statement.pdf"
+    f.write_bytes(b"%PDF-fake")
+    with patch("skills.finance.ingestion.folder_watcher.send_alert") as mock_alert, \
+         patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
+        asyncio.run(handle_new_file(f))
+    assert (tmp_inbox / "amex_cc_statement.pdf.rejected").exists()
+    mock_dispatch.assert_not_called()
+    assert mock_alert.called
+    assert "extension" in str(mock_alert.call_args).lower() or "expects" in str(mock_alert.call_args).lower()
+
+
+def test_icici_xlsx_extension_mismatch_rejected(tmp_inbox):
+    from skills.finance.ingestion.folder_watcher import handle_new_file
+    f = tmp_inbox / "icici_cc_statement.xlsx"
+    f.write_bytes(b"PK\x03\x04fake")
+    with patch("skills.finance.ingestion.folder_watcher.send_alert") as mock_alert, \
+         patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
+        asyncio.run(handle_new_file(f))
+    assert (tmp_inbox / "icici_cc_statement.xlsx.rejected").exists()
+    mock_dispatch.assert_not_called()
+    assert mock_alert.called
 
 
 def test_dispatch_ambiguous_filename_alerts_and_rejects(tmp_inbox):
-    from skills.finance.ingestion.folder_watcher import handle_new_pdf
+    from skills.finance.ingestion.folder_watcher import handle_new_file
     f = tmp_inbox / "icici_amex_partnership.pdf"
     f.write_bytes(b"%PDF-fake")
     with patch("skills.finance.ingestion.folder_watcher.send_alert") as mock_alert, \
          patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch:
-        asyncio.run(handle_new_pdf(f))
-    assert (tmp_inbox / "icici_amex_partnership.pdf.rejected.pdf").exists()
+        asyncio.run(handle_new_file(f))
+    assert (tmp_inbox / "icici_amex_partnership.pdf.rejected").exists()
     mock_dispatch.assert_not_called()
     assert mock_alert.called
-    # Alert message should mention "ambiguous"
     assert "ambiguous" in str(mock_alert.call_args).lower()
 
 
 def test_already_rejected_files_are_ignored(tmp_inbox):
-    from skills.finance.ingestion.folder_watcher import handle_new_pdf
-    f = tmp_inbox / "random.pdf.rejected.pdf"
+    from skills.finance.ingestion.folder_watcher import handle_new_file
+    f = tmp_inbox / "random.pdf.rejected"
     f.write_bytes(b"%PDF-fake")
     with patch("skills.finance.ingestion.folder_watcher.dispatch_to_parser") as mock_dispatch, \
          patch("skills.finance.ingestion.folder_watcher.send_alert") as mock_alert:
-        asyncio.run(handle_new_pdf(f))
+        asyncio.run(handle_new_file(f))
     mock_dispatch.assert_not_called()
     mock_alert.assert_not_called()
-    # File should remain in place
     assert f.exists()
 ```
 
-- [ ] **Step 8.2: Run tests, verify failures**
+- [ ] **Step 6.2: Run tests, verify failures**
 
 ```bash
 pytest tests/test_folder_watcher.py -v
 ```
-Expected: 5 errors.
+Expected: 7 errors.
 
-- [ ] **Step 8.3: Implement `folder_watcher.py`**
+- [ ] **Step 6.3: Implement `folder_watcher.py`**
 
 ```python
 # skills/finance/ingestion/folder_watcher.py
-"""Watches ~/finance-inbox/ for new PDFs and dispatches to the right parser.
+"""Watches ~/finance-inbox/ for new PDFs and XLSX files; dispatches to the right parser.
 
 Single-threaded: files are processed sequentially in arrival order. Spec §5.1
-locks this for V1 (debugging simplicity). Async file ops via asyncio.to_thread."""
+locks this for V1 (debugging simplicity)."""
 from __future__ import annotations
 import asyncio
 import logging
@@ -2056,6 +1632,7 @@ from watchdog.observers import Observer
 
 from skills.finance.ingestion._common import (
     AmbiguousCredentialError,
+    Bank,
     CredentialNotFoundError,
     SourceMeta,
     detect_bank_from_filename,
@@ -2073,124 +1650,160 @@ ACCOUNT_IDS: dict[str, UUID] = {
     "amex_cc": UUID("10000000-0000-0000-0000-000000000005"),
 }
 
+# Per-bank expected file extension (V1)
+EXPECTED_EXTENSION: dict[str, str] = {
+    "icici_cc": ".pdf",
+    "amex_cc": ".xlsx",
+}
+
 
 async def dispatch_to_parser(
-    pdf_path: Path,
-    bank: str,
-    password: str,
+    file_path: Path,
+    bank: Bank,
+    password: str | None,
 ) -> None:
-    """Call the right parser, then ingest. Calibration is wired in for AMEX
-    Month 1; for now, dispatch to the standard parser."""
+    """Call the right parser, then ingest. Send Telegram summary after ingest."""
     if bank == "icici_cc":
         from skills.finance.ingestion.parsers.icici_cc import parse as icici_parse
-        parse_result = await asyncio.to_thread(icici_parse, pdf_path, password)
+        parse_result = await asyncio.to_thread(icici_parse, file_path, password or "")
+        source = SourceMeta(source="manual_pdf", source_ref=file_path.name)
     elif bank == "amex_cc":
-        # During Month 1 calibration window, route via calibration.calibrate_amex.
-        # For now (Week 2 plan), wire the standard parser; calibration wiring
-        # is folded into Task 7's run-time invocation by the orchestrator.
         from skills.finance.ingestion.parsers.amex_cc import parse as amex_parse
-        parse_result = await asyncio.to_thread(amex_parse, pdf_path, password)
+        parse_result = await asyncio.to_thread(amex_parse, file_path)
+        source = SourceMeta(source="manual_xlsx", source_ref=file_path.name)
     else:
         raise ValueError(f"Unknown bank: {bank}")
 
-    source_meta = SourceMeta(source="manual_pdf", source_ref=pdf_path.name)
     account_id = ACCOUNT_IDS[bank]
-    await ingest(parse_result, account_id, source_meta)
+    log_entry = await ingest(parse_result, account_id, source)
+    await _send_summary(bank, file_path.name, log_entry, parse_result)
 
 
-async def handle_new_pdf(pdf_path: Path) -> None:
-    """Top-level handler for any new PDF. Routes by filename token match.
+async def _send_summary(bank: Bank, filename: str, log_entry: dict,
+                        parse_result) -> None:
+    """Send a per-statement summary message to the main bot."""
+    from skills.finance.bot.main import bot as main_bot
+    status = log_entry["status"]
+    if status == "success":
+        derived = parse_result.declared_totals.get("_derived_from_rows", False)
+        annotation = ""
+        if derived:
+            annotation = "\n_Note: declared totals derived from row sums; validator effectively skipped (no Total row in source)._"
+        text = (
+            f"📥 {bank.upper().replace('_', ' ')} {filename} ingested\n"
+            f"{log_entry['rows_added']} rows, "
+            f"₹{log_entry['extracted_total']} (declared ₹{log_entry['declared_total']}) — totals match ✓"
+            f"{annotation}"
+        )
+        await main_bot.send_message(
+            chat_id=settings.telegram_chat_id_rajat, text=text, parse_mode="Markdown",
+        )
+    elif status == "skipped_duplicate":
+        await main_bot.send_message(
+            chat_id=settings.telegram_chat_id_rajat,
+            text=f"📥 {bank.upper().replace('_', ' ')} {filename}: already ingested previously (skipped).",
+        )
+    # 'total_check_failed' alerts go via send_alert from inside pipeline; no double-message.
 
-    On unknown / ambiguous filename: rename to <name>.rejected.pdf so re-scans
-    don't re-trigger; send alert."""
-    name = pdf_path.name
-    # Already-rejected files: ignore
-    if name.endswith(".rejected.pdf"):
-        logger.debug("ignoring already-rejected file: %s", name)
-        return
+
+async def handle_new_file(file_path: Path) -> None:
+    """Top-level handler for any new file in the inbox.
+
+    Routes by filename token-match + extension match. On unknown / ambiguous /
+    extension-mismatch: rename to <name>.rejected so re-scans don't re-trigger;
+    send alert."""
+    name = file_path.name
+    if name.endswith(".rejected"):
+        return  # already-rejected; ignore
+
+    ext = file_path.suffix.lower()
+    if ext not in (".pdf", ".xlsx"):
+        return  # not a file type we care about
 
     bank = detect_bank_from_filename(name)
     if bank is None:
-        # Either no token match or ambiguous (both icici and amex matched).
-        # detect_bank_from_filename returns None for both; we re-check to write
-        # a clearer alert message.
         n = name.lower()
         is_icici = ("icici" in n) and ("cc" in n)
         is_amex = ("amex" in n) or ("american" in n)
         if is_icici and is_amex:
-            msg = f"Ambiguous filename '{name}' — matches both ICICI and AMEX patterns. Rejected."
+            msg = f"Ambiguous filename '{name}' — matches both ICICI and AMEX. Rejected."
         else:
             msg = f"Filename '{name}' doesn't match any known bank pattern. Rename to include 'icici_cc_' or 'amex_cc_' and re-drop. Rejected."
-        rejected = pdf_path.with_suffix(".pdf.rejected.pdf")
-        # If the file is already named foo.pdf, this becomes foo.pdf.rejected.pdf
-        # via with_suffix replacing .pdf with .pdf.rejected.pdf would actually
-        # overwrite — use the rename approach explicitly:
-        rejected = pdf_path.parent / f"{name}.rejected.pdf"
-        await asyncio.to_thread(pdf_path.rename, rejected)
+        rejected = file_path.parent / f"{name}.rejected"
+        await asyncio.to_thread(file_path.rename, rejected)
         await send_alert(msg)
         return
 
-    try:
-        password = await asyncio.to_thread(password_lookup, bank)
-    except (AmbiguousCredentialError, CredentialNotFoundError) as e:
-        logger.exception("password lookup failed for %s", bank)
-        rejected = pdf_path.parent / f"{name}.rejected.pdf"
-        await asyncio.to_thread(pdf_path.rename, rejected)
-        await send_alert(f"Password lookup for {bank} failed: {e}. {name} rejected.")
+    expected_ext = EXPECTED_EXTENSION[bank]
+    if ext != expected_ext:
+        msg = (
+            f"Bank '{bank}' expects {expected_ext} files in V1; got '{ext}' for '{name}'. "
+            f"ICICI = PDF, AMEX = XLSX. Rejected."
+        )
+        rejected = file_path.parent / f"{name}.rejected"
+        await asyncio.to_thread(file_path.rename, rejected)
+        await send_alert(msg)
         return
 
+    # Resolve password — only for ICICI (XLSX is unencrypted)
+    password: str | None = None
+    if bank == "icici_cc":
+        try:
+            password = await asyncio.to_thread(password_lookup, bank)
+        except (AmbiguousCredentialError, CredentialNotFoundError) as e:
+            logger.exception("password lookup failed for %s", bank)
+            rejected = file_path.parent / f"{name}.rejected"
+            await asyncio.to_thread(file_path.rename, rejected)
+            await send_alert(f"Password lookup for {bank} failed: {e}. {name} rejected.")
+            return
+
     try:
-        await dispatch_to_parser(pdf_path, bank=bank, password=password)
+        await dispatch_to_parser(file_path, bank=bank, password=password)
     except Exception as e:  # noqa: BLE001
         logger.exception("dispatch failed for %s", name)
         await send_alert(f"Ingestion failed for {name}: {e}")
 
 
-class _PdfEventHandler(FileSystemEventHandler):
+class _FileEventHandler(FileSystemEventHandler):
     """Bridges sync watchdog callbacks to the async event loop."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
         super().__init__()
         self.loop = loop
-        self._processing_lock = asyncio.Lock()
+        self._lock = asyncio.Lock()
 
     def on_created(self, event: FileSystemEvent) -> None:
         self._maybe_handle(event)
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        # Use destination path on move events
         self._maybe_handle(event, path_attr="dest_path")
 
     def _maybe_handle(self, event: FileSystemEvent, path_attr: str = "src_path") -> None:
         if event.is_directory:
             return
         path = Path(getattr(event, path_attr))
-        if path.suffix.lower() != ".pdf":
+        if path.suffix.lower() not in (".pdf", ".xlsx"):
             return
-        # Hop back to the asyncio loop and serialize processing via lock.
         asyncio.run_coroutine_threadsafe(self._serialized_handle(path), self.loop)
 
     async def _serialized_handle(self, path: Path) -> None:
-        async with self._processing_lock:
-            await handle_new_pdf(path)
+        async with self._lock:
+            await handle_new_file(path)
 
 
 async def run() -> None:
-    """Long-running task — start in app.py alongside aiogram + APScheduler.
-
-    Returns when cancelled (via SIGTERM through the orchestrator's stop_event)."""
+    """Long-running task — start in app.py alongside aiogram + APScheduler."""
     inbox = Path(settings.finance_inbox_path)
     inbox.mkdir(parents=True, exist_ok=True)
 
     loop = asyncio.get_running_loop()
-    handler = _PdfEventHandler(loop)
+    handler = _FileEventHandler(loop)
     observer = Observer()
     observer.schedule(handler, str(inbox), recursive=False)
     observer.start()
     logger.info("folder_watcher started on %s", inbox)
 
     try:
-        # Keep the task alive; the observer runs its own thread.
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
@@ -2201,36 +1814,36 @@ async def run() -> None:
         logger.info("folder_watcher stopped cleanly")
 ```
 
-- [ ] **Step 8.4: Run tests, verify all pass**
+- [ ] **Step 6.4: Run tests, verify all pass**
 
 ```bash
 pytest tests/test_folder_watcher.py -v
 ```
-Expected: 5 passed.
+Expected: 7 passed.
 
-- [ ] **Step 8.5: Lint, typecheck, full suite**
+- [ ] **Step 6.5: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
 
-- [ ] **Step 8.6: Commit**
+- [ ] **Step 6.6: Commit**
 
 ```bash
 git add skills/finance/ingestion/folder_watcher.py tests/test_folder_watcher.py
-git commit -m "feat(ingestion): folder watcher with loose-token bank dispatch"
+git commit -m "feat(ingestion): folder watcher with bank+extension dispatch (PDF or XLSX)"
 ```
 
 ---
 
-## Task 9: `bot/document_handler.py` — Telegram doc handler with auto-rename
+## Task 7: `bot/document_handler.py` — Telegram doc handler with auto-rename
 
 **Files:**
 - Create: `skills/finance/bot/document_handler.py`
 - Test: `tests/test_document_handler.py`
 - Modify: `skills/finance/bot/main.py` — register the handler
 
-- [ ] **Step 9.1: Write failing tests**
+- [ ] **Step 7.1: Write failing tests**
 
 ```python
 # tests/test_document_handler.py
@@ -2239,7 +1852,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def test_unambiguous_icici_filename_saves_with_canonical_prefix(tmp_path, monkeypatch):
+def test_unambiguous_icici_pdf_saves_with_canonical_prefix(tmp_path, monkeypatch):
     from skills.finance.bot.document_handler import handle_document
 
     inbox = tmp_path / "finance-inbox"
@@ -2262,8 +1875,33 @@ def test_unambiguous_icici_filename_saves_with_canonical_prefix(tmp_path, monkey
     save_path = Path(fake_bot.download.call_args.kwargs["destination"])
     assert save_path.parent == inbox
     assert save_path.name.startswith("icici_cc_")
+    assert save_path.suffix == ".pdf"
     fake_message.answer.assert_called_once()
-    assert "icici_cc_" in fake_message.answer.call_args.args[0].lower()
+
+
+def test_unambiguous_amex_xlsx_saves_with_canonical_prefix(tmp_path, monkeypatch):
+    from skills.finance.bot.document_handler import handle_document
+
+    inbox = tmp_path / "finance-inbox"
+    inbox.mkdir()
+    monkeypatch.setattr(
+        "skills.finance.bot.document_handler.settings",
+        MagicMock(finance_inbox_path=str(inbox), telegram_chat_id_rajat="42"),
+    )
+
+    fake_doc = MagicMock(file_name="AMEX_April_2026.xlsx", file_id="fake_id")
+    fake_message = MagicMock(chat=MagicMock(id=42), document=fake_doc)
+    fake_message.answer = AsyncMock()
+
+    fake_bot = MagicMock()
+    fake_bot.download = AsyncMock()
+
+    asyncio.run(handle_document(fake_message, bot=fake_bot))
+
+    fake_bot.download.assert_called_once()
+    save_path = Path(fake_bot.download.call_args.kwargs["destination"])
+    assert save_path.name.startswith("amex_cc_")
+    assert save_path.suffix == ".xlsx"
 
 
 def test_ambiguous_filename_sends_inline_keyboard(tmp_path, monkeypatch):
@@ -2285,45 +1923,45 @@ def test_ambiguous_filename_sends_inline_keyboard(tmp_path, monkeypatch):
 
     asyncio.run(handle_document(fake_message, bot=fake_bot))
 
-    # Should NOT have downloaded yet (waits for user keyboard pick)
     fake_bot.download.assert_not_called()
     fake_message.answer.assert_called_once()
-    # The reply should include a reply_markup (inline keyboard)
-    call_kwargs = fake_message.answer.call_args.kwargs
-    assert "reply_markup" in call_kwargs
+    assert "reply_markup" in fake_message.answer.call_args.kwargs
 
 
-def test_non_whitelisted_user_silently_ignored():
+def test_non_whitelisted_user_silently_ignored(monkeypatch):
     from skills.finance.bot.document_handler import handle_document
 
+    monkeypatch.setattr(
+        "skills.finance.bot.document_handler.settings",
+        MagicMock(finance_inbox_path="/tmp", telegram_chat_id_rajat="42"),
+    )
+
     fake_doc = MagicMock(file_name="anything.pdf", file_id="fake_id")
-    fake_message = MagicMock(chat=MagicMock(id=999), document=fake_doc)  # WRONG chat
+    fake_message = MagicMock(chat=MagicMock(id=999), document=fake_doc)
     fake_message.answer = AsyncMock()
 
     fake_bot = MagicMock()
     fake_bot.download = AsyncMock()
 
-    with patch("skills.finance.bot.document_handler.settings",
-               MagicMock(finance_inbox_path="/tmp", telegram_chat_id_rajat="42")):
-        asyncio.run(handle_document(fake_message, bot=fake_bot))
+    asyncio.run(handle_document(fake_message, bot=fake_bot))
 
     fake_message.answer.assert_not_called()
     fake_bot.download.assert_not_called()
 ```
 
-- [ ] **Step 9.2: Run tests, verify failures**
+- [ ] **Step 7.2: Run tests, verify failures**
 
 ```bash
 pytest tests/test_document_handler.py -v
 ```
-Expected: 3 errors.
+Expected: 4 errors.
 
-- [ ] **Step 9.3: Implement `bot/document_handler.py`**
+- [ ] **Step 7.3: Implement `bot/document_handler.py`**
 
 ```python
 # skills/finance/bot/document_handler.py
-"""Telegram document handler — receives PDF docs, saves to inbox with canonical
-filename. Folder watcher then dispatches.
+"""Telegram document handler — receives PDF or XLSX docs, saves to inbox with
+canonical filename. Folder watcher then dispatches.
 
 Auto-renaming reduces user friction: forward an unmodified Gmail attachment;
 the bot detects bank from filename or asks via inline keyboard."""
@@ -2351,13 +1989,13 @@ def _is_rajat(message: Message) -> bool:
 
 
 def _sanitize_stem(name: str) -> str:
-    """Strip extension; replace whitespace and odd chars with `_` for filesystem safety."""
     stem = Path(name).stem
     return re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_")
 
 
 def _canonical_name(bank: str, original_filename: str) -> str:
-    return f"{bank}_{_sanitize_stem(original_filename)}.pdf"
+    ext = Path(original_filename).suffix.lower() or ".pdf"
+    return f"{bank}_{_sanitize_stem(original_filename)}{ext}"
 
 
 async def handle_document(message: Message, bot: Bot) -> None:
@@ -2369,7 +2007,7 @@ async def handle_document(message: Message, bot: Bot) -> None:
     3b. Ambiguous / no match → send inline keyboard prompting [ICICI CC] / [AMEX CC] / [Cancel].
     """
     if not _is_rajat(message):
-        return  # silent
+        return
 
     doc = message.document
     if doc is None:
@@ -2378,8 +2016,6 @@ async def handle_document(message: Message, bot: Bot) -> None:
     bank = detect_bank_from_filename(doc.file_name or "")
 
     if bank is None:
-        # Ask via inline keyboard. Encode the file_id in callback_data so the
-        # callback handler can download once user picks.
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="ICICI CC", callback_data=f"pickbank:icici_cc:{doc.file_id}"),
             InlineKeyboardButton(text="AMEX CC", callback_data=f"pickbank:amex_cc:{doc.file_id}"),
@@ -2391,7 +2027,6 @@ async def handle_document(message: Message, bot: Bot) -> None:
         )
         return
 
-    # Unambiguous match: save and let the watcher take over.
     inbox = Path(settings.finance_inbox_path)
     inbox.mkdir(parents=True, exist_ok=True)
     canonical = inbox / _canonical_name(bank, doc.file_name or "unnamed.pdf")
@@ -2400,69 +2035,67 @@ async def handle_document(message: Message, bot: Bot) -> None:
     await message.answer(f"Saved as `{canonical.name}` — processing.", parse_mode="Markdown")
 ```
 
-- [ ] **Step 9.4: Wire handler into `bot/main.py`**
+- [ ] **Step 7.4: Wire handler into `bot/main.py`**
 
-Read the current `bot/main.py` and append (or modify) so the document handler is registered:
+Read the current `skills/finance/bot/main.py`. Append (or modify) so the document handler is registered alongside the existing `/ping` handler:
 
 ```python
-# Add to skills/finance/bot/main.py:
+# Imports (add):
 from aiogram import F
-from aiogram.types import Document
 from skills.finance.bot.document_handler import handle_document
 
+# After existing /ping handler:
 @dp.message(F.document)
 async def _document_handler(message: Message) -> None:
     await handle_document(message, bot=bot)
 ```
 
-(Note: place the import + registration after the existing `dp` and `bot` definitions, alongside the `/ping` handler. Don't break the existing middleware registration.)
-
-- [ ] **Step 9.5: Run all bot tests**
+- [ ] **Step 7.5: Run tests**
 
 ```bash
 pytest tests/test_document_handler.py tests/test_bot_middleware.py -v
 ```
-Expected: 4 passed (3 new + 1 existing middleware).
+Expected: 5 passed (4 new + 1 existing middleware).
 
-- [ ] **Step 9.6: Lint, typecheck, full suite**
+- [ ] **Step 7.6: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
 
-- [ ] **Step 9.7: Commit**
+- [ ] **Step 7.7: Commit**
 
 ```bash
 git add skills/finance/bot/document_handler.py skills/finance/bot/main.py tests/test_document_handler.py
-git commit -m "feat(bot): Telegram document handler with auto-rename + inline keyboard fallback"
+git commit -m "feat(bot): Telegram document handler — PDF + XLSX auto-rename, inline keyboard fallback"
 ```
 
 ---
 
-## Task 10: `/model list` command
+## Task 8: `/model list` command
 
 **Files:**
 - Modify: `skills/finance/bot/main.py` — register `/model` command
-- Test: extend `tests/test_bot_middleware.py` (or new `test_bot_commands.py`)
+- Test: extend `tests/test_bot_middleware.py`
 
-- [ ] **Step 10.1: Write failing test**
+- [ ] **Step 8.1: Write failing test**
+
+Append to `tests/test_bot_middleware.py`:
 
 ```python
-# Append to tests/test_bot_middleware.py OR new file tests/test_bot_commands.py
-
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 
 def test_model_list_command_returns_yaml():
     from skills.finance.bot.main import model_list_handler
-    fake_message = MagicMock(chat=MagicMock(id=42))
+    fake_message = MagicMock(chat=MagicMock(id=42), text="/model list")
     fake_message.answer = AsyncMock()
 
     fake_yaml = "pdf_extraction:\n  model: gemini/gemini-2.5-flash\n"
     with patch("skills.finance.bot.main.settings",
                MagicMock(telegram_chat_id_rajat="42")), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(__enter__=lambda s: MagicMock(read=lambda: fake_yaml), __exit__=lambda *a: None))):
+         patch("builtins.open", mock_open(read_data=fake_yaml)):
         asyncio.run(model_list_handler(fake_message))
 
     fake_message.answer.assert_called_once()
@@ -2474,7 +2107,7 @@ def test_model_list_command_returns_yaml():
 
 def test_model_list_rejects_non_rajat():
     from skills.finance.bot.main import model_list_handler
-    fake_message = MagicMock(chat=MagicMock(id=999))
+    fake_message = MagicMock(chat=MagicMock(id=999), text="/model list")
     fake_message.answer = AsyncMock()
     with patch("skills.finance.bot.main.settings",
                MagicMock(telegram_chat_id_rajat="42")):
@@ -2482,16 +2115,15 @@ def test_model_list_rejects_non_rajat():
     fake_message.answer.assert_not_called()
 ```
 
-- [ ] **Step 10.2: Run tests, verify failures**
+- [ ] **Step 8.2: Run tests, verify failures**
 
 ```bash
 pytest tests/test_bot_middleware.py -v
 ```
-Expected: tests for `model_list_handler` fail (NotFound).
 
-- [ ] **Step 10.3: Implement `/model` handler in `bot/main.py`**
+- [ ] **Step 8.3: Implement `/model` handler in `bot/main.py`**
 
-Append to `skills/finance/bot/main.py`:
+Append:
 
 ```python
 from pathlib import Path
@@ -2507,8 +2139,6 @@ async def model_list_handler(message: Message) -> None:
     if not _is_rajat(message):
         return
 
-    # Parse subcommand. For Week 2, only 'list' is supported.
-    # If the message is just '/model' with no arg, treat as 'list'.
     parts = (message.text or "").split(maxsplit=1)
     subcommand = parts[1].strip().lower() if len(parts) > 1 else "list"
 
@@ -2525,19 +2155,19 @@ async def model_list_handler(message: Message) -> None:
     await message.answer(f"```yaml\n{yaml_text}\n```", parse_mode="Markdown")
 ```
 
-- [ ] **Step 10.4: Run tests, verify pass**
+- [ ] **Step 8.4: Run tests, verify pass**
 
 ```bash
 pytest tests/test_bot_middleware.py -v
 ```
 
-- [ ] **Step 10.5: Lint, typecheck, full suite**
+- [ ] **Step 8.5: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
 
-- [ ] **Step 10.6: Commit**
+- [ ] **Step 8.6: Commit**
 
 ```bash
 git add skills/finance/bot/main.py tests/test_bot_middleware.py
@@ -2546,40 +2176,40 @@ git commit -m "feat(bot): /model list command (V1 read-only; full family deferre
 
 ---
 
-## Task 11: `app.py` orchestration update
+## Task 9: `app.py` orchestration update
 
-Folder watcher must run as a sibling task alongside aiogram polling, APScheduler, and FastAPI. Graceful SIGTERM must also stop it.
+Folder watcher must run as a sibling task alongside aiogram polling, APScheduler, FastAPI. Graceful SIGTERM must also stop it.
 
 **Files:**
 - Modify: `app.py`
-- Modify: `pyproject.toml` (add `watchdog`, `pdf2image`)
+- Modify: `pyproject.toml` (add `watchdog`)
 
-- [ ] **Step 11.1: Add new dependencies to `pyproject.toml`**
+- [ ] **Step 9.1: Add `watchdog` to `pyproject.toml`**
 
 Edit `pyproject.toml` `[project] dependencies = [...]` to include:
 
 ```toml
 "watchdog>=3",                # folder watcher for ingestion (Week 2)
-"pdf2image>=1.17",            # AMEX page rasterization (requires `brew install poppler`)
 ```
 
-Then install:
+(No `pdf2image`, no `Pillow` — those were dropped in r2.)
 
+Then:
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
 deactivate
 ```
 
-- [ ] **Step 11.2: Wire `folder_watcher.run()` into `app.py`**
+- [ ] **Step 9.2: Wire `folder_watcher.run()` into `app.py`**
 
-Read the current `app.py`. Modify `main()` so the folder watcher runs concurrently with the bot, scheduler, and HTTP server. Concretely, add to the `asyncio.gather(...)` line:
+Read the current `app.py`. Modify `main()` so the folder watcher runs concurrently with the bot, scheduler, and HTTP server:
 
 ```python
-# In skills/finance/ingestion/__init__.py — make sure run() is exported
+# Add to imports near the top of app.py:
 from skills.finance.ingestion import folder_watcher
 
-# In app.py main(), update the gather:
+# Modify main() — add watcher_task before the existing asyncio.gather:
 async def main() -> None:
     configure_logging()
     stop_event = asyncio.Event()
@@ -2591,7 +2221,6 @@ async def main() -> None:
     sched.start()
     logger.info("scheduler started; jobs=%s", [j.id for j in sched.get_jobs()])
 
-    # New: folder watcher task. Cancelled on stop_event.
     watcher_task = asyncio.create_task(folder_watcher.run())
 
     try:
@@ -2616,7 +2245,7 @@ async def _wait_then_cancel(stop_event: asyncio.Event, task: asyncio.Task) -> No
         pass
 ```
 
-- [ ] **Step 11.3: Verify import smoke**
+- [ ] **Step 9.3: Verify import smoke**
 
 ```bash
 source .venv/bin/activate
@@ -2625,21 +2254,20 @@ deactivate
 ```
 Expected: `import OK` with no traceback.
 
-- [ ] **Step 11.4: Lint, typecheck, full suite**
+- [ ] **Step 9.4: Lint, typecheck, full suite**
 
 ```bash
 make lint && make typecheck && make test
 ```
-Expected: clean across the board.
 
-- [ ] **Step 11.5: Commit**
+- [ ] **Step 9.5: Commit**
 
 ```bash
 git add app.py pyproject.toml
-git commit -m "feat(app): start folder_watcher as concurrent task with graceful shutdown"
+git commit -m "feat(app): start folder_watcher concurrently with graceful shutdown wiring"
 ```
 
-- [ ] **Step 11.6: Restart launchd-supervised app**
+- [ ] **Step 9.6: Restart launchd-supervised app**
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.rajat.pfa.app
@@ -2648,60 +2276,48 @@ launchctl print gui/$(id -u)/com.rajat.pfa.app | grep -E "state|last exit code"
 ```
 Expected: `state = running`, no recent crash.
 
-Verify the watcher started by tailing the log:
-
 ```bash
 tail -20 ~/finance-logs/pfa.log | grep folder_watcher
 ```
-Expected: a line like `folder_watcher started on /Users/rajat/finance-inbox`.
+Expected: line like `folder_watcher started on /Users/rajat/finance-inbox`.
 
 ---
 
-## Task 12: Backfill drill + acceptance verification
+## Task 10: Backfill drill + acceptance verification
 
-**No code changes.** This task drives the spec §17 acceptance criteria to green by running the real backfill end-to-end with your 6 real PDFs.
+**No code changes.** Drives spec §17 acceptance criteria green by running the real backfill.
 
-- [ ] **Step 12.1: Verify `tests/golden_fixtures/amex_sample.pdf` is in place**
+- [ ] **Step 10.1: Verify fixtures present**
 
 ```bash
 ls -la tests/golden_fixtures/
 ```
-Expected: both `icici_sample.pdf` and `amex_sample.pdf` present (gitignored).
+Expected: `icici_sample.pdf` (Week 1) AND `amex_sample.xlsx` (Week 2 precondition).
 
-If `amex_sample.pdf` is missing — drop one real recent AMEX statement there before continuing.
+- [ ] **Step 10.2: Drop 6 files into `~/finance-inbox/`**
 
-- [ ] **Step 12.2: Drop 6 PDFs into `~/finance-inbox/`**
-
-You provide: 3 months × 2 cards = 6 password-protected PDFs.
+3 ICICI CC PDFs + 3 AMEX CC XLSX. Example:
 
 ```bash
-# Example — adjust paths to your actual files
-cp ~/Downloads/icici_cc_2026_03.pdf ~/finance-inbox/
-cp ~/Downloads/icici_cc_2026_04.pdf ~/finance-inbox/
-cp ~/Downloads/icici_cc_2026_05.pdf ~/finance-inbox/
-cp ~/Downloads/amex_cc_2026_03.pdf ~/finance-inbox/
-cp ~/Downloads/amex_cc_2026_04.pdf ~/finance-inbox/
-cp ~/Downloads/amex_cc_2026_05.pdf ~/finance-inbox/
+cp ~/Downloads/ICICI_April_2026.pdf       ~/finance-inbox/icici_cc_2026_04.pdf
+cp ~/Downloads/ICICI_May_2026.pdf         ~/finance-inbox/icici_cc_2026_05.pdf
+cp ~/Downloads/ICICI_June_2026.pdf        ~/finance-inbox/icici_cc_2026_06.pdf
+cp ~/Downloads/AMEX_April_2026.xlsx       ~/finance-inbox/amex_cc_2026_04.xlsx
+cp ~/Downloads/AMEX_May_2026.xlsx         ~/finance-inbox/amex_cc_2026_05.xlsx
+cp ~/Downloads/AMEX_June_2026.xlsx        ~/finance-inbox/amex_cc_2026_06.xlsx
 ```
 
-- [ ] **Step 12.3: Watch logs as they process**
+(Or forward each from your phone to the Telegram bot — it'll auto-rename and save.)
+
+- [ ] **Step 10.3: Watch logs as they process**
 
 ```bash
 tail -f ~/finance-logs/pfa.log
 ```
 
-You should see, one by one for each PDF:
-- `folder_watcher` log: `dispatch_to_parser` for the bank
-- For ICICI: `pipeline ingested N rows` log
-- For AMEX (first 2-3): possible calibration disagreements logged
-- Telegram message via main bot: "📥 ICICI CC March 2026 ingested..." etc.
+You should see, for each file, `dispatch_to_parser` log + `pipeline ingested N rows` + Telegram summary message arriving in your main bot.
 
-If any PDF fails (totals mismatch, parser hard fail), check `ingestion_log` via Supabase SQL editor:
-```sql
-SELECT * FROM ingestion_log ORDER BY timestamp DESC LIMIT 10;
-```
-
-- [ ] **Step 12.4: Verify the backfill landed**
+- [ ] **Step 10.4: Verify backfill landed**
 
 In Supabase SQL editor (as service role):
 
@@ -2720,49 +2336,39 @@ GROUP BY a.nickname
 ORDER BY a.nickname;
 ```
 
-Expected: two rows (ICICI CC, AMEX CC), each with rows spanning ~3 months, totals matching what your statements declared.
+Expected: two rows (ICICI CC, AMEX CC), each spanning ~3 months, totals matching what your statements declared.
 
-- [ ] **Step 12.5: Verify acceptance criteria from spec §17**
+- [ ] **Step 10.5: Walk spec §17 acceptance criteria**
 
-Walk through each:
-- [ ] 6 backfill PDFs ingested into `transactions`
-- [ ] `make lint && make typecheck && make test` clean — run again now to confirm
-- [ ] Validator catches a manually-injected wrong amount — covered by `test_statement_validator.py::test_validator_over_tolerance_rejects`
-- [ ] AMEX calibration adjudication path exercised — covered by `test_calibration.py::test_diff_merchant_differs_one_disagreement` + real disagreement log if any
-- [ ] Folder watcher running under launchd — verified in 11.6
-- [ ] Telegram doc handler auto-renames non-canonical filename — try forwarding a non-canonically-named PDF to your bot and verify
-- [ ] Each parser exports `__parser_version__` — covered by `test_icici_cc_parser.py::test_parser_version_string`, `test_amex_cc_parser.py::test_amex_parser_version`
-- [ ] `lib/llm.py` re-adds `images` parameter — covered by `test_llm.py::test_llm_passes_images_to_litellm`
-- [ ] `request_logs` shows AMEX calibration calls totaling ≤ ₹200 — verify with:
-  ```sql
-  SELECT count(*) AS calls, sum(total_cost) AS total_usd
-  FROM request_logs
-  WHERE metadata->>'task' = 'pdf_extraction'
-    AND created_at >= '2026-04-26';
-  ```
-  Multiply USD by ~84 — should be ≤ ₹200.
-- [ ] No PII committed to git: `git log --all --source -- 'tests/golden_fixtures/*.pdf' '.env' 'credentials.yaml' 'migrations/*.local.sql'` returns nothing
-- [ ] `tasks/week-2-todo.md` exists; `tasks/todo.md` preserved as Week 1 historical record — `ls tasks/`
+Each box from spec §17:
+- [ ] 6 backfill files ingested into `transactions`
+- [ ] `make lint && make typecheck && make test` clean — re-run now to confirm
+- [ ] Validator catches manually-injected wrong amount → `test_statement_validator.py::test_validator_over_tolerance_rejects` passes
+- [ ] AMEX XLSX header detection on real fixture → `test_amex_cc_parser.py::test_parse_real_amex_xlsx_returns_nonempty_parseresult` passes
+- [ ] Folder watcher under launchd → verified in 9.6
+- [ ] Telegram doc handler auto-rename → forward a non-canonically-named PDF AND XLSX, verify both saved with prefix
+- [ ] Each parser exports `__parser_version__` — `"icici-cc/v1"`, `"amex-cc-xlsx/v1"` — covered by tests
+- [ ] No PII committed to git: `git log --all --source -- 'tests/golden_fixtures/*.pdf' 'tests/golden_fixtures/*.xlsx' '.env' 'credentials.yaml' 'migrations/*.local.sql'` returns nothing
+- [ ] `tasks/week-2-todo.md` exists; `tasks/todo.md` preserved as Week 1 record — `ls tasks/`
+- [ ] No new `brew install` lines required to run Week 2
 
-- [ ] **Step 12.6: Tag week-2-ingestion**
+- [ ] **Step 10.6: Tag `week-2-ingestion`**
 
 ```bash
 git -c user.name="Rajat Sharma" -c user.email="sharma.rajat70@gmail.com" \
-    tag -a week-2-ingestion -m "Week 2 — Ingestion (ICICI CC + AMEX CC) complete
+    tag -a week-2-ingestion -m "Week 2 — Ingestion (ICICI CC PDF + AMEX CC XLSX) complete
 
 3 months of historical CC transactions ingested.
 Statement-total validator: live, ±₹1 tolerance.
-AMEX dual-model calibration: ran on first 2-3 statements, ₹X total cost.
-Folder watcher + Telegram doc handler: both source paths exercised.
+ICICI CC: deterministic via pikepdf + pdfplumber + regex.
+AMEX CC: deterministic via pandas.read_excel (no LLM in path; calibration not needed).
+Folder watcher + Telegram doc handler: both source paths exercised; PDF + XLSX both supported.
 /model list: shipped (full family deferred to Week 4)."
-
-# (Optional) Push when gh authenticated:
-# git push origin main week-2-ingestion
 ```
 
-- [ ] **Step 12.7: Update `tasks/lessons.md` with any patterns from Week 2**
+- [ ] **Step 10.7: Update `tasks/lessons.md` with any patterns from Week 2**
 
-If anything surprised you during implementation (parser regex calibration pain, supabase-py quirk, AMEX format quirk, etc.), append a lesson entry. Keep it specific and actionable for future weeks.
+Anything that surprised you (regex calibration pain, supabase-py quirk, AMEX column variant we hadn't anticipated, etc.) — append a lessons entry. Specific + actionable.
 
 ---
 
@@ -2772,64 +2378,36 @@ If anything surprised you during implementation (parser regex calibration pain, 
 
 | Spec section | Implemented in |
 |---|---|
-| §1 Goal | Tasks 4, 5, 6, 7, 8, 9, 11, 12 |
-| §2 Scope | Tasks 1-12 (in scope); deferred items confirmed in plan File structure section |
-| §3 Architecture (4 layers) | Task 1 (common types), 2 (validate), 4-5 (parse), 6 (persist), 8 (source: watcher), 9 (source: Telegram) |
-| §4 File structure | Mirrored in plan's File structure |
-| §5.1 Folder watcher | Task 8 |
-| §5.2 Telegram doc handler | Task 9 |
+| §1 Goal | Tasks 3, 4, 5, 6, 7, 9, 10 |
+| §2 Scope | Tasks 1–10 cover in-scope; deferred items acknowledged in plan File structure |
+| §3 Architecture (4 layers) | Task 1 (common types), 2 (validate), 3+4 (parse), 5 (persist), 6 (source: watcher), 7 (source: Telegram) |
+| §4 File structure | Mirrored in plan |
+| §5.1 Folder watcher (PDF+XLSX, ext mismatch) | Task 6 |
+| §5.2 Telegram doc handler | Task 7 |
 | §6.1 Common contract | Task 1 |
-| §6.2 ICICI parser (deterministic) | Task 4 |
-| §6.3 AMEX parser (LLM) | Task 5 |
+| §6.2 ICICI parser (deterministic PDF) | Task 3 |
+| §6.3 AMEX parser (deterministic XLSX) | Task 4 |
 | §7 Validator | Task 2 |
-| §8 Persist (pipeline) | Task 6 |
-| §9 Telegram review flow | Task 7 (calibration message), Task 6 (success/fail summary via pipeline + bot — via `_log_*` returning to caller in Task 8 + Task 9) — see note below |
-| §10 /model list | Task 10 |
-| §11 Backfill mechanics | Task 12 |
-| §12 Error handling matrix | Task 8 + Task 9 (rejection paths), Task 6 (status logging) |
+| §8 Persist (pipeline) | Task 5 |
+| §9 Telegram review flow | Task 6 (`_send_summary` in `dispatch_to_parser`) |
+| §10 /model list | Task 8 |
+| §11 Backfill mechanics | Task 10 |
+| §12 Error handling matrix | Task 6 (rejection paths), Task 5 (status logging) |
 | §13 Testing strategy | All tasks include unit tests |
-| §14 New dependencies | Task 11.1 |
-| §15 Code changes outside ingestion/ | Task 3 (llm.py), Task 9.4 (bot/main.py), Task 11.2 (app.py) |
-| §16 Open implementation risks | Task 0.2 verifies upsert; Task 4.4 calibrates regex; Task 11.6 verifies launchd |
-| §17 Acceptance criteria | Task 12.5 walks each |
+| §14 New dependencies | Task 9.1 (just `watchdog`) |
+| §15 Code changes outside ingestion/ | Task 7.4 (bot/main.py), Task 9.2 (app.py) |
+| §16 Open implementation risks | Task 0.2 verifies upsert; Task 4 calibrates KNOWN_COLUMN_SETS; Task 9.6 verifies launchd |
+| §17 Acceptance criteria | Task 10.5 walks each |
 
-**Gap noted:** Spec §9.1 mentions a Telegram summary message after each successful ingest (e.g., "📥 ICICI CC May 2026 ingested..."). The current pipeline.py (Task 6) only writes to `ingestion_log` and returns the row; it doesn't send a Telegram message. The Telegram summary message-per-statement is implicitly emitted by `dispatch_to_parser` in `folder_watcher.py` (Task 8) calling `pipeline.ingest`, then formatting the result and calling `bot.send_message`. **Add this as a follow-up to Task 8** — `dispatch_to_parser` should send a summary message to the main bot after `ingest()` returns. Updated note inline below.
-
-**Placeholder scan:** Searched for "TBD", "TODO", "implement later", vague handwaves. None found in step content. The two `NotImplementedError` markers in Step 7.3 are placeholders that Step 7.4 explicitly fills in (TDD-style), not plan failures.
+**Placeholder scan:** No "TBD", "TODO", "implement later", or vague handwaves. Every code-step has actual code.
 
 **Type consistency:**
-- `ParsedRow`, `ParseResult`, `SourceMeta`, `ValidationResult` defined in Task 1; consistently imported by Tasks 2, 4, 5, 6, 7, 8.
-- `Bank` literal type (`"icici_cc" | "amex_cc"`) defined in Task 1; used in Task 1 helpers, Task 8, Task 9.
-- `__parser_version__` strings: `"icici-cc/v1"` (Task 4) and `"amex-cc-llm/v1"` (Task 5); referenced consistently in pipeline (Task 6) and tests (4.1, 5.1).
-- `RAJAT_USER_ID` defined as a hardcoded UUID in Task 1; used in pipeline (Task 6).
-- `ACCOUNT_IDS` mapping in Task 8 references the seeded account UUIDs from `migrations/003_seed.local.sql`.
-
-## Inline addendum to Task 8 (catching the Spec §9.1 gap)
-
-Add to Task 8's `dispatch_to_parser` after the `ingest(...)` call:
-
-```python
-# At the end of dispatch_to_parser, after ingest completes:
-log_entry = await ingest(parse_result, account_id, source_meta)
-
-# Send Telegram summary via main bot
-from skills.finance.bot.main import bot as main_bot
-status = log_entry["status"]
-if status == "success":
-    summary = (
-        f"📥 {bank.upper()} ingested\n"
-        f"{log_entry['rows_added']} rows, "
-        f"₹{log_entry['extracted_total']} (declared ₹{log_entry['declared_total']}) "
-        f"— totals match ✓"
-    )
-    await main_bot.send_message(chat_id=settings.telegram_chat_id_rajat, text=summary)
-elif status == "skipped_duplicate":
-    summary = f"📥 {bank.upper()} {pdf_path.name}: already ingested previously (skipped)."
-    await main_bot.send_message(chat_id=settings.telegram_chat_id_rajat, text=summary)
-# 'total_check_failed' alerts go via send_alert from inside pipeline; no double-message here.
-```
-
-Update Task 8.3 implementation to include this summary-send step before committing.
+- `ParsedRow`, `ParseResult`, `SourceMeta`, `ValidationResult` defined in Task 1, imported consistently by Tasks 2, 3, 4, 5, 6.
+- `Bank` literal type (`"icici_cc" | "amex_cc"`) in Task 1; used in Tasks 1, 6.
+- `__parser_version__` strings: `"icici-cc/v1"` (Task 3), `"amex-cc-xlsx/v1"` (Task 4); referenced consistently.
+- `RAJAT_USER_ID` UUID from Task 1; used in Task 5.
+- `ACCOUNT_IDS`, `EXPECTED_EXTENSION` mappings in Task 6 reference seeded UUIDs from `migrations/003_seed.local.sql`.
+- `pdf_content_hash` field name retained on `ParseResult` even though it now also covers XLSX content (documented in `_common.py` comment) — this preserves schema column name `transactions.pdf_content_hash` from Week 1 without a migration.
 
 ---
 
@@ -2837,8 +2415,8 @@ Update Task 8.3 implementation to include this summary-send step before committi
 
 **Plan complete and saved to `tasks/week-2-todo.md`. Two execution options:**
 
-**1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration. Same workflow that landed Week 1 cleanly.
+**1. Subagent-Driven (recommended)** — fresh subagent per task, review between tasks, fast iteration. Same workflow that landed Week 1 cleanly.
 
-**2. Inline Execution** — Execute tasks in this session using `superpowers:executing-plans`, batch execution with checkpoints for review.
+**2. Inline Execution** — execute tasks in this session using `superpowers:executing-plans`, batch execution with checkpoints.
 
 **Which approach?**

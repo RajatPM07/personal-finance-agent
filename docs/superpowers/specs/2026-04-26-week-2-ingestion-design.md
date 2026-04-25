@@ -1,32 +1,36 @@
 # Week 2 — Ingestion (ICICI CC + AMEX CC) — Design Spec
 
-**Status:** Locked, awaiting user sign-off before implementation plan
-**Date:** 2026-04-26
+**Status:** Locked v2 — pivoted from LLM-AMEX-PDF to deterministic-AMEX-XLSX after user clarified file format
+**Date:** 2026-04-26 (v1), 2026-04-26 (v2 same-day pivot)
 **PRD references:** §11 Week 2, §6 model routing, §7 schema, §18.4 PDF integrity, §19.5 `import_hash` Mode B
 **Lessons referenced:** bout-is-CSV-only, casparser-pin-conflict, aiogram-handle_signals, Supavisor-username, RLS-auto-enable
+
+**v1 → v2 changelog:**
+- AMEX is XLSX (not password-protected PDF). Parser is `pandas.read_excel`, deterministic.
+- Dropped: LLM-from-page-image extraction, dual-model calibration, ₹200 Anthropic budget cap, `pdf2image`, `Pillow`, `brew install poppler`, `lib/llm.py` `images` parameter re-add.
+- Net: 12 tasks → 10 tasks; Anthropic balance fully reserved for `sql_agent` + `affordability_reasoning`.
 
 ---
 
 ## 1. Goal
 
-Stand up an end-to-end ingestion pipeline for ICICI CC and AMEX CC PDF statements. By end of Week 2:
+Stand up an end-to-end ingestion pipeline for ICICI CC (PDF) and AMEX CC (XLSX) statements. By end of Week 2:
 - Three months of historical ICICI CC and AMEX CC transactions populate `transactions`
-- Statement-total validator catches silent corruption (extracted-sum vs declared-total mismatch)
-- AMEX is calibrated against a second LLM (Claude Haiku) for the first 2–3 statements, surfacing model disagreements for human adjudication
-- New monthly statements drop into `~/finance-inbox/` (or via Telegram doc) and are processed automatically with a summary notification
+- Statement-total validator catches silent corruption on ICICI (extracted-sum vs declared-total mismatch)
+- AMEX uses deterministic `pandas.read_excel` extraction (no LLM in path; calibration not needed)
+- New monthly statements drop into `~/finance-inbox/` (PDF or XLSX) or via Telegram doc and are processed automatically with a summary notification
 
 ## 2. Scope
 
 **In scope:**
-- ICICI CC parser (deterministic via `pikepdf` + `pdfplumber` + regex)
-- AMEX CC parser (LLM via `llm("pdf_extraction")` with Pydantic-enforced output)
+- ICICI CC parser (deterministic via `pikepdf` + `pdfplumber` + regex; password-protected PDF)
+- AMEX CC parser (deterministic via `pandas.read_excel`; XLSX, no password)
 - `statement_validator.py` — pure function, parser-agnostic
 - `pipeline.py` — orchestrator: parse → validate → dedup → insert
-- `calibration.py` — AMEX dual-model diff (Month 1 only, ₹200 cap)
-- `folder_watcher.py` — watches `~/finance-inbox/`, dispatches by loose filename token match
-- Telegram doc handler in `bot/document_handler.py` — auto-renames on save
+- `folder_watcher.py` — watches `~/finance-inbox/` for `*.pdf` AND `*.xlsx`, dispatches by file extension + loose filename token match
+- Telegram doc handler in `bot/document_handler.py` — auto-renames on save (handles both PDF and XLSX)
 - `/model list` command (read-only, the only `/model` subcommand in V1 Week 2)
-- 3-month backfill (6 PDFs total)
+- 3-month backfill (3 ICICI CC PDFs + 3 AMEX CC XLSX = 6 files total)
 
 **Explicitly deferred to Week 3+:**
 - Gmail integration (F1) → Week 3
@@ -42,19 +46,19 @@ Stand up an end-to-end ingestion pipeline for ICICI CC and AMEX CC PDF statement
 ## 3. Architecture
 
 ```
-[Source]                   [Parse]                  [Validate]               [Persist]
-folder watcher ─┐
-                ├─→ parsers/{bank}.py  ─→  statement_validator  ─→  pipeline.ingest
-Telegram doc ───┘    ├─ icici_cc: deterministic        ↓                       ↓
-                     └─ amex_cc:  LLM (Gemini)      needs_review            transactions
-                                                     + alert
+[Source]                       [Parse]                       [Validate]               [Persist]
+folder watcher (.pdf+.xlsx) ─┐
+                             ├─→ parsers/{bank}.py    ─→  statement_validator  ─→  pipeline.ingest
+Telegram doc ───────────────┘    ├─ icici_cc: pikepdf+pdfplumber+regex     ↓                  ↓
+                                 └─ amex_cc:  pandas.read_excel        needs_review       transactions
+                                                                          + alert
 ```
 
 Four layers, each isolated and independently testable.
 
-**Source layer** — two equivalent entry points; both write the PDF to `~/finance-inbox/` and let `folder_watcher` do dispatch. The Telegram doc handler is thin — it saves the doc with a canonical filename (auto-rename if needed), then the watcher picks it up. No duplicated routing logic between source paths.
+**Source layer** — two equivalent entry points; both write the file (PDF or XLSX) to `~/finance-inbox/` and let `folder_watcher` do dispatch. The Telegram doc handler is thin — it saves the doc with a canonical filename (auto-rename if needed), then the watcher picks it up. No duplicated routing logic between source paths.
 
-**Parse layer** — per-bank modules under `skills/finance/ingestion/parsers/`. Each exports a manually-curated `__parser_version__` (per CLAUDE.md invariant #4) and exposes `parse(pdf_path: Path, password: str) -> ParseResult`.
+**Parse layer** — per-bank modules under `skills/finance/ingestion/parsers/`. Each exports a manually-curated `__parser_version__` (per CLAUDE.md invariant #4) and exposes `parse(file_path: Path, password: str | None = None) -> ParseResult`. ICICI uses the `password` argument; AMEX ignores it (XLSX is unencrypted).
 
 **Validate layer** — `statement_validator.py` is a pure function: `validate(parse_result) -> ValidationResult`. Compares extracted sums against declared totals with ±₹1 tolerance. Centralized, parser-agnostic, no I/O.
 
@@ -67,14 +71,13 @@ skills/finance/ingestion/
 ├── __init__.py
 ├── _common.py             # ParsedRow, ParseResult, SourceMeta, ValidationResult dataclasses;
 │                          #   password_lookup(bank, last4) → str via credentials.yaml
-├── folder_watcher.py      # watchdog Observer; dispatches by loose filename token match
+├── folder_watcher.py      # watchdog Observer; dispatches by file extension + filename token match
 ├── statement_validator.py # pure function — validate(ParseResult) → ValidationResult
 ├── pipeline.py            # async ingest orchestrator
-├── calibration.py         # AMEX dual-model diff (Month 1 only)
 └── parsers/
     ├── __init__.py
-    ├── icici_cc.py        # deterministic; __parser_version__ = "icici-cc/v1"
-    └── amex_cc.py         # LLM;          __parser_version__ = "amex-cc-llm/v1"
+    ├── icici_cc.py        # deterministic PDF; __parser_version__ = "icici-cc/v1"
+    └── amex_cc.py         # deterministic XLSX; __parser_version__ = "amex-cc-xlsx/v1"
 
 skills/finance/bot/
 ├── main.py                # existing — register doc handler + /model list
@@ -83,14 +86,13 @@ skills/finance/bot/
 tests/
 ├── test_statement_validator.py    # pure-fn unit tests, ~6 cases
 ├── test_icici_cc_parser.py        # golden fixture, gated on ICICI_PDF_PASSWORD
-├── test_amex_cc_parser.py         # mocked llm() call
+├── test_amex_cc_parser.py         # golden fixture (XLSX); deterministic — no LLM mocks
 ├── test_pipeline.py               # mocked service_client + adb()
-├── test_calibration.py            # mocked dual-model + canned disagreement scenarios
-├── test_folder_watcher.py         # mocked watchdog events
+├── test_folder_watcher.py         # mocked watchdog events for both .pdf and .xlsx
 ├── test_document_handler.py       # mocked aiogram Document message
 └── golden_fixtures/
     ├── icici_sample.pdf            # exists from Week 1
-    └── amex_sample.pdf             # user provides before Week 2 dispatch
+    └── amex_sample.xlsx            # user provides before Week 2 dispatch
 ```
 
 New top-level files: none. New `app.py` modifications: start `folder_watcher.observe()` alongside aiogram + APScheduler + FastAPI.
@@ -99,16 +101,17 @@ New top-level files: none. New `app.py` modifications: start `folder_watcher.obs
 
 ### 5.1 Folder watcher (`folder_watcher.py`)
 
-Runs a `watchdog.observers.Observer` watching `~/finance-inbox/`. On `on_created` / `on_moved` for any `*.pdf`:
+Runs a `watchdog.observers.Observer` watching `~/finance-inbox/`. On `on_created` / `on_moved` for any `*.pdf` OR `*.xlsx`:
 
 1. Lowercase the filename for matching.
 2. Token-match (Pattern B):
-   - Contains `'icici'` AND `'cc'` → `bank = 'icici_cc'`
-   - Contains `'amex'` OR `'american'` → `bank = 'amex_cc'`
-   - Both ICICI and AMEX tokens present → ambiguous; alert via main bot, log `ambiguous_filename`, rename file to `<name>.rejected.pdf` so it isn't reprocessed.
-   - No match → alert: "Filename `{name}` doesn't match any known bank pattern. Rename to include `icici_cc_` or `amex_cc_` and re-drop." Rename to `.rejected.pdf`.
-3. Resolve password via `_common.password_lookup(bank, last4=None)`. With one card per bank today, the helper prefix-matches `bank_*` keys in `credentials.yaml` and uses the unique entry. If multiple match (future state), the filename must include `<last4>` and the helper does an exact lookup.
-4. Dispatch to parser: `parsers.<bank>.parse(pdf_path, password)`.
+   - Contains `'icici'` AND `'cc'` → `bank = 'icici_cc'` (expected extension: `.pdf`)
+   - Contains `'amex'` OR `'american'` → `bank = 'amex_cc'` (expected extension: `.xlsx`)
+   - Both ICICI and AMEX tokens present → ambiguous; alert via main bot, log `ambiguous_filename`, rename file to `<name>.rejected` (preserving original extension visibility) so it isn't reprocessed.
+   - No match → alert: "Filename `{name}` doesn't match any known bank pattern. Rename to include `icici_cc_` or `amex_cc_` and re-drop." Rename to `.rejected`.
+   - Bank/extension mismatch (e.g., `amex_cc_*.pdf` or `icici_cc_*.xlsx`) → alert: "Bank `{bank}` doesn't accept `{ext}` files in V1. ICICI expects PDF; AMEX expects XLSX." Reject.
+3. Resolve password via `_common.password_lookup(bank, last4=None)` — **only for ICICI**. AMEX XLSX is unencrypted; pass `password=None` to its parser.
+4. Dispatch to parser: `parsers.<bank>.parse(file_path, password=password_or_none)`.
 5. Hand the result to `pipeline.ingest(...)`.
 
 The watcher runs as a separate `asyncio` task started by `app.py`. **Single-threaded**: files processed sequentially in arrival order. No concurrency in V1 (debugging simplicity).
@@ -181,40 +184,35 @@ def detect_bank_from_filename(filename: str) -> Optional[Literal['icici_cc', 'am
 - Declared totals (`total_spends`, `total_credits`, `closing_balance`) extracted from the summary block (typically labeled near top or bottom of statement). Exact regex calibrated against the Week 1 golden fixture during implementation.
 - `__parser_version__ = "icici-cc/v1"` — bump if output shape changes.
 
-### 6.3 AMEX CC parser (`parsers/amex_cc.py`, LLM)
+### 6.3 AMEX CC parser (`parsers/amex_cc.py`, deterministic XLSX)
 
-- `pikepdf.open(...)` to decrypt → temp file.
-- `pdf2image.convert_from_path(tmp.name)` rasterizes each page to PIL Image (requires `poppler` system package, installed via `brew install poppler`). Encode each page as base64-PNG.
-- For the whole statement (or per page if multi-page), call:
+AMEX's MyStatement portal exports an unencrypted `.xlsx` file. Direct, deterministic structured-cell extraction via `pandas.read_excel`.
+
+- `pandas.read_excel(file_path, engine='openpyxl')` → `DataFrame`.
+- The XLSX usually has a header band, a transaction-rows band, and a footer/summary band. Header detection is the trickiest part because AMEX's column names vary slightly across regional exports. The parser tries known header sets in order and uses the first that matches all required columns:
   ```python
-  resp = llm(
-      "pdf_extraction",
-      system="You are a precise PDF extractor for AMEX credit card statements...",
-      prompt="Extract every transaction row plus the declared totals. Output strict JSON matching the schema...",
-      images=[b64_png_page_1, b64_png_page_2, ...],
-  )
+  KNOWN_COLUMN_SETS = [
+      # India MyStatement
+      {"date": "Date", "description": "Description", "amount": "Amount"},
+      # Alternate naming
+      {"date": "Transaction Date", "description": "Description of Transaction", "amount": "Amount"},
+      # Split debit/credit columns variant
+      {"date": "Date", "description": "Description", "debit": "Charges", "credit": "Credits"},
+  ]
   ```
-- The response is parsed via:
-  ```python
-  class LLMRow(BaseModel):
-      txn_date: date
-      amount: Decimal
-      direction: Literal['in', 'out']
-      raw_merchant: str
+- `find_header_row(df)`: walks the first 30 rows, returns the index of the row whose values match a known set (case-insensitive, whitespace-tolerant). On no match → raise `ParserError("AMEX header row not detected; actual headers near top: <preview>")` so the user sees the real names and can extend `KNOWN_COLUMN_SETS`.
+- For each transaction row in the data band:
+  - Date → parse via `pd.to_datetime` with `dayfirst=True` (AMEX India uses DD/MM/YYYY).
+  - Description → strip whitespace, this becomes `raw_merchant`.
+  - Amount → AMEX's signed convention: positive = charge (debit), negative = refund/payment (credit). Convert to:
+    - `amount = abs(value)` (always positive in `ParsedRow`)
+    - `direction = 'out' if value > 0 else 'in'`
+  - Skip rows where any required cell is `NaN` (these are typically separator / blank rows in the export).
+- `source_row_ordinal` assigned 1..N in DataFrame row order (after dropping NaN separators).
+- **Declared totals**: AMEX exports may or may not include a "Total" / "Statement Total" row. Parser tries to find a row in the footer band where the description column contains "total" (case-insensitive) and the amount column has a numeric value. If found, that's `declared_totals['total_spends']` (or split if separate "total credits" present). If not found, **set declared_totals['total_spends'] = sum(rows where direction='out')** (computed from rows themselves) and emit a `logger.warning` that the validator will pass tautologically. Document this in the parser's module docstring as a known weakness.
+- `__parser_version__ = "amex-cc-xlsx/v1"` — bump if column detection or row-skipping logic changes.
 
-  class LLMStatement(BaseModel):
-      rows: list[LLMRow]
-      total_spends: Decimal
-      total_credits: Decimal
-      closing_balance: Decimal | None = None
-
-  parsed = LLMStatement.model_validate_json(resp.choices[0].message.content)
-  ```
-- Schema violation → raise `ParserError`; pipeline logs `status='failed'`.
-- `source_row_ordinal` assigned 1..N in LLM output order.
-- `__parser_version__ = "amex-cc-llm/v1"` — bump if prompt or schema changes meaningfully.
-
-**Required change to `lib/llm.py`:** re-add `images: list[str] | None = None` parameter (removed in Week 1 as YAGNI; now actually needed). Existing `test_llm.py` MUST continue to pass — verify no regression.
+**No `lib/llm.py` change needed.** Re-adding the `images` parameter is deferred indefinitely (no Week 2 consumer; AMEX no longer needs it; will revisit when something else does).
 
 ## 7. Validate layer
 
@@ -300,30 +298,17 @@ After totals failure, **alert bot** sends:
 > NOT ingested. `ingestion_log.id=<uuid>` in `needs_review`.
 > (Manual resolution until `/retry <uuid>` lands in Week 4.)
 
-### 9.2 AMEX CC, Month 1 calibration window
+### 9.2 AMEX CC, all months
 
-`calibration.py` runs both Gemini Flash + Claude Haiku for the first 2–3 AMEX statements. After both extractions:
+Same flow as ICICI CC. AMEX is deterministic via `pandas.read_excel`; no LLM in path; no calibration needed.
 
-1. Both extractions independently go through `statement_validator`. If either fails, calibration treats it as a disagreement.
-2. Inner-join the row sets on `(txn_date, amount, direction)`. Rows present in only one set OR with differing `raw_merchant` are flagged as disagreements.
-3. Each disagreement is serialized to a Telegram message via main bot:
+If `declared_totals` were derived from row sums (the "no totals row in XLSX" path documented in §6.3), the validator passes tautologically and the success summary annotates this:
 
-> 🧪 AMEX CC May 2026 — calibration mode
-> 23 rows total. Gemini and Haiku agree on 22.
-> 1 disagreement at row 12:
-> • Gemini → `2026-05-15  ₹3,400.00  ZOMATO`
-> • Haiku  → `2026-05-15  ₹3,400.00  SWIGGY`
-> Reply [G] / [H] / [skip]
+> 📥 AMEX CC May 2026 ingested
+> 23 rows, ₹47,820 spend (₹500 credits)
+> Note: declared totals derived from row sums (XLSX had no summary row); validator effectively skipped.
 
-User adjudicates each disagreement. After all resolved, the chosen row set is ingested via the standard pipeline.
-
-**Cost cap enforcement:** before each `llm("pdf_extraction", ...)` call inside calibration, sum `total_cost` from `request_logs` where `metadata->>'task' = 'pdf_extraction'` for AMEX rows. If the running total approaches ₹200, calibration aborts with notification: "Calibration budget reached; remaining AMEX statements will use Gemini-only path." This adds ~50ms latency per call — acceptable for Month-1 volume.
-
-**Expected actual spend:** 3 statements × ~3 pages × 2 models ≈ 18 LLM calls × $0.01 ≈ ₹15 worst case. Well within ₹200.
-
-### 9.3 AMEX CC, post-calibration (statement #4 onward)
-
-Single-model (Gemini Flash). Same flow as ICICI CC.
+This is a known weakness of the XLSX path. PRD's "totals validator catches silent corruption" guarantee is weaker for AMEX in this case — but the failure mode is qualitatively different from LLM hallucination: pandas either reads cells correctly or raises, so the corruption surface is much smaller.
 
 ## 10. /model command (V1 minimal)
 
@@ -347,66 +332,65 @@ Final summary message after all 6:
 
 | Failure | `ingestion_log.status` | Alert | Partial insert |
 |---|---|---|---|
-| Filename matches no bank | `failed` | yes (main bot) | none — file renamed `<name>.rejected.pdf` |
+| Filename matches no bank | `failed` | yes (main bot) | none — file renamed `<name>.rejected` |
 | Filename matches both banks | `ambiguous_filename` | yes (main bot, prompts user) | none |
-| Wrong PDF password | `failed` (error_msg includes credential key tried) | yes (alert bot) | none |
-| Parser hard fail (regex no match / LLM JSON parse error) | `failed` | yes (alert bot) | none |
-| Totals mismatch | `total_check_failed` | yes (alert bot) | **none — entire statement rejected** |
+| Bank/extension mismatch (e.g. ICICI XLSX or AMEX PDF) | `failed` | yes (main bot) | none — file renamed `<name>.rejected` |
+| Wrong ICICI PDF password | `failed` (error_msg includes credential key tried) | yes (alert bot) | none |
+| ICICI parser hard fail (regex no match) | `failed` | yes (alert bot) | none |
+| AMEX parser hard fail (XLSX header detection failure) | `failed` (error_msg includes preview of actual headers) | yes (alert bot) | none |
+| Totals mismatch (ICICI; or AMEX when declared totals row present) | `total_check_failed` | yes (alert bot) | **none — entire statement rejected** |
 | All rows already exist | `skipped_duplicate` | no | none — idempotent re-drop |
 | Some rows already exist | `success` with `rows_added < total` | no | inserts only new |
-| LLM cost cap hit during calibration | `success` with note | yes (main bot, "calibration aborted") | yes — Gemini-only path used |
 
 ## 13. Testing strategy
 
-Every test runs as part of `make test`. No live LLM tests committed.
+Every test runs as part of `make test`. No live LLM tests committed; no live network tests.
 
 - `test_statement_validator.py` — 6 cases (exact / within-tolerance / over-tolerance / missing declared / all-out / all-in / refund-only)
 - `test_icici_cc_parser.py` — golden fixture, gated on `ICICI_PDF_PASSWORD` env var (skips when unset, like Week 1's `test_pdf_smoke.py`)
-- `test_amex_cc_parser.py` — mocked `llm()` returning canned Pydantic-validated JSON; verifies schema enforcement raises on malformed responses
+- `test_amex_cc_parser.py` — golden fixture (`amex_sample.xlsx`), no env var gating because XLSX is unencrypted. Test loads the fixture, verifies header detection works, row count matches expected, ordinals are contiguous, validator passes against the parser output. Plus unit tests for `find_header_row` against canned `pd.DataFrame` inputs (no real fixture needed).
 - `test_pipeline.py` — mocked `service_client` and `adb()` (MagicMock pattern from `test_bot_middleware.py`); verifies validation path, hash computation, log status
-- `test_calibration.py` — mocked dual-model returning canned scenarios (perfect agreement / single disagreement / multiple disagreements / one-side-missing-row / cost-cap-hit)
-- `test_folder_watcher.py` — mocked `watchdog` events; verifies token-match dispatch, ambiguous-name handling, `.rejected.pdf` renaming
-- `test_document_handler.py` — mocked aiogram Message + Document; verifies auto-rename and inline-keyboard prompt for ambiguous names
+- `test_folder_watcher.py` — mocked `watchdog` events; verifies token-match dispatch, ambiguous-name handling, bank/extension mismatch rejection, `.rejected` renaming
+- `test_document_handler.py` — mocked aiogram Message + Document; verifies auto-rename and inline-keyboard prompt for ambiguous names; covers both PDF and XLSX paths
 
-`tests/golden_fixtures/amex_sample.pdf` is gitignored (PII), user provides locally before Week 2 dispatch.
+`tests/golden_fixtures/amex_sample.xlsx` is gitignored (PII), user provides locally before Week 2 dispatch.
 
 ## 14. New dependencies
 
 In `pyproject.toml`:
 - `watchdog>=3` — folder watcher
-- `pdf2image>=1.17` — AMEX page rasterization (pulls `Pillow` transitively, no separate declaration needed)
+- (`pandas>=2.2` and `openpyxl>=3.1` already present from Week 1 — no new declaration needed for AMEX XLSX reading)
 
-System deps:
-- `brew install poppler` — required by `pdf2image` (similar to ghostscript+tcl-tk for camelot)
+System deps: **none new for Week 2.** `poppler` is no longer required (no `pdf2image` in path).
 
 ## 15. Code changes outside `skills/finance/ingestion/`
 
-- `skills/finance/lib/llm.py` — re-add `images: list[str] | None = None` parameter to `llm()`. Existing `test_llm.py` MUST still pass (no regression).
-- `app.py` — start `folder_watcher.observe()` in a task alongside aiogram + APScheduler + FastAPI. Wire it into the graceful-shutdown handler so a SIGTERM also stops the watcher.
+- `app.py` — start `folder_watcher.run()` in a task alongside aiogram + APScheduler + FastAPI. Wire it into the graceful-shutdown handler so a SIGTERM also stops the watcher.
 - `skills/finance/bot/main.py` — register `document_handler` and the `/model list` handler.
+
+(No `skills/finance/lib/llm.py` change in Week 2 — the `images` parameter re-add was tied to the LLM-AMEX path; with deterministic XLSX parsing it's no longer needed. Defer indefinitely.)
 
 ## 16. Open implementation risks
 
-1. **supabase-py upsert with `ignore_duplicates`** — semantics not yet confirmed. If `upsert(..., on_conflict='import_hash', ignore_duplicates=True)` doesn't actually use ON CONFLICT DO NOTHING, fall back to per-row insert with try/except for unique-constraint violation. Verify during implementation.
-2. **AMEX statement format variability** — first 2–3 statements during calibration are the only window to catch format drift. If the LLM's parsing breaks on a partner-card variant, calibration adjudication is the safety net.
-3. **`pdf2image` + `poppler` on macOS Apple Silicon** — `brew install poppler` works in standard ARM Homebrew. If `pdf2image.convert_from_path` errors on user's specific Python build, fall back to `pdfplumber.Page.to_image()` (slower, no system dep).
-4. **`request_logs` cost-cap query latency** — the SQL aggregation before each calibration LLM call adds ~50ms. Acceptable for Month-1 (low volume); not for ongoing. Document this so Week 3+ doesn't naively reuse the pattern.
+1. **supabase-py upsert with `ignore_duplicates`** — semantics not yet confirmed. If `upsert(..., on_conflict='import_hash', ignore_duplicates=True)` doesn't actually use ON CONFLICT DO NOTHING, fall back to per-row insert with try/except for unique-constraint violation. Verify during implementation (Task 0).
+2. **AMEX XLSX column-name variability** — `KNOWN_COLUMN_SETS` covers 3 known layouts. If the user's actual export uses a 4th layout, the parser raises `ParserError` with the actual headers in the message. User extends the dict and re-runs. No silent corruption — just a clean retry path.
+3. **AMEX XLSX missing declared totals row** — when the export has no "Total" row, validator runs against row-derived totals (tautological pass) and the success message annotates this. Documented as a known weakness in §6.3 + §9.2. Not a bug, but worth surfacing.
+4. **ICICI CC declared totals regex calibration** — `TOTAL_SPENDS_RE` etc. in `icici_cc.py` are best-guess labels. May need calibration against the real golden fixture during implementation. Validator going `ok=False` against a real statement is the surface here.
 
 ## 17. Acceptance criteria
 
 By end of Week 2, all of these must pass:
 
-- [ ] 6 backfill PDFs ingested into `transactions` (3 months × 2 cards, ~200–300 rows expected)
+- [ ] 6 backfill files ingested into `transactions` (3 ICICI CC PDFs + 3 AMEX CC XLSX, ~200–300 rows expected)
 - [ ] `make lint && make typecheck && make test` clean at every commit
 - [ ] Statement-total validator catches a manually-injected wrong-amount in ≥1 row of a test fixture (regression coverage in `test_statement_validator.py`)
-- [ ] AMEX calibration adjudication path exercised at least once (real disagreement OR mocked test)
+- [ ] AMEX XLSX header detection succeeds against the real fixture; if the column set isn't in `KNOWN_COLUMN_SETS`, `ParserError` includes the actual headers
 - [ ] Folder watcher running under launchd's app supervisor; survives `kill -9` (KeepAlive=true validates)
-- [ ] Telegram doc handler auto-renames a non-canonical filename ("Statement_April.pdf") on save
-- [ ] Each parser exports `__parser_version__` and the test suite asserts the exact strings (`"icici-cc/v1"`, `"amex-cc-llm/v1"`)
-- [ ] `lib/llm.py` re-adds `images` parameter and existing `test_llm.py` still passes
-- [ ] `request_logs` shows AMEX calibration calls totaling ≤ ₹200
+- [ ] Telegram doc handler auto-renames a non-canonical filename on save (test with both PDF and XLSX inputs)
+- [ ] Each parser exports `__parser_version__` and the test suite asserts the exact strings (`"icici-cc/v1"`, `"amex-cc-xlsx/v1"`)
 - [ ] No PII committed to git (verified via pre-commit hook + manual `git log -p` review)
 - [ ] `tasks/week-2-todo.md` exists and is the live plan; `tasks/todo.md` preserved as Week 1 historical record
+- [ ] No new system deps (`brew install` lines) required to run Week 2 — the venv from Week 1 + the new pip dep `watchdog` is sufficient
 
 ## 18. References
 
