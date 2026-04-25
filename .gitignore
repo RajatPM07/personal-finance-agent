@@ -41,3 +41,11 @@ launchd/*.local.plist
 ~/finance-logs/
 tasks/preconditions-notes.md
 *.local.sql
+
+# Planning artifacts
+CLAUDE.md.draft
+github_research_prompt.md
+github_research_results.md
+
+# Credentials
+credentials/gmail_oauth.json
