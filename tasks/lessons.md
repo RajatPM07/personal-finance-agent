@@ -70,3 +70,22 @@ Format: date → pattern → root cause → rule.
 - For any helper that constructs a connection string from `.env`, derive `<project_ref>` from `SUPABASE_URL`'s subdomain rather than asking the user for a separate var.
 
 **Captured as:** This lessons entry; the pattern was discovered while running the Week 1 readonly verification drill on 2026-04-25.
+
+---
+
+## 2026-04-25 — Supabase auto-enables RLS on tables created via the SQL editor (and the Table Editor's "RLS: Disabled" column lies)
+
+**Pattern:** Tables created via the Supabase SQL editor have `pg_class.relrowsecurity = true` by default. With RLS on and **zero policies**, any non-superuser role's SELECT returns zero rows — no error, just silent filtering. The Supabase dashboard's Table Editor shows "RLS: Disabled" in its column even when RLS is actually enabled with zero policies. Two different states, same display label.
+
+**Why service_role still saw the data:** Postgres superuser/`bypassrls` roles bypass RLS by default. The `service_role` Supabase issues to its REST API has bypassrls; the `finance_agent_readonly` role we created does not. Result: ingestion writes (via service_role) succeed; readonly reads (via finance_agent_readonly) silently return nothing. Worst-of-both: data is in the table, but the SQL agent will say "you have no transactions."
+
+**Why our Week 1 readonly drill missed it:** `migrations/002_verify_readonly.sql` only tested the negative case ("can readonly mutate?" → no, correctly). The single positive line `SELECT count(*) FROM transactions` ran against an unseeded `transactions` table (Week 2 ingestion hadn't started), so `count = 0` looked like the right answer. Negative-only tests can't surface this class of bug.
+
+**Discovery path:** Caught while doing a sanity-check `SELECT type, institution, nickname FROM accounts` as readonly before Week 2 brainstorming — got 0 rows even though service_role REST showed 7 accounts. `has_table_privilege(... 'SELECT')` returned `t` for every table, so the GRANT was correct; `pg_class.relrowsecurity` was `t` everywhere despite `pg_policies` being empty. That triangulated to RLS auto-enable.
+
+**Rule:**
+1. For V1 single-user, `001_init.sql` MUST explicitly `DISABLE ROW LEVEL SECURITY` on every table after `CREATE TABLE`. Don't rely on the dashboard's column or assume RLS is off.
+2. Every readonly verification drill MUST include positive-read assertions on seeded tables (e.g., `SELECT count(*) FROM users` expected > 0). Negative-only tests miss the silent-filter case entirely.
+3. Don't trust the Supabase dashboard's "RLS: Disabled" column at face value. Verify with `SELECT relrowsecurity FROM pg_class WHERE relnamespace = 'public'::regnamespace;` if there's any doubt.
+
+**Captured as:** 14× `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` appended to `migrations/001_init.sql`; positive-read assertions added to `migrations/002_verify_readonly.sql`; this entry.

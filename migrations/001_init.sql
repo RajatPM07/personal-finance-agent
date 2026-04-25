@@ -253,3 +253,35 @@ create table public.request_logs (
     litellm_call_id text unique,
     primary key (id)
 ) tablespace pg_default;
+
+-- ============================================================================
+-- RLS — DISABLED in V1 per PRD §18.10.
+--
+-- Supabase auto-enables Row Level Security on tables created via the SQL
+-- editor (relrowsecurity=true). With RLS on and zero policies, a non-
+-- superuser role's SELECT returns ZERO ROWS — no error, just silent filter.
+-- The Supabase dashboard's "RLS: Disabled" column is misleading: it means
+-- "no custom policies attached," NOT "RLS literally turned off." Two
+-- different states, same display label.
+--
+-- For V1 (single-user), we explicitly DISABLE RLS so the finance_agent_readonly
+-- role can do its job. RLS is a V2 hard prerequisite (PRD §18.10) — when V2
+-- lands, a separate migration will:
+--   1. ENABLE ROW LEVEL SECURITY on every user-scoped table
+--   2. Add per-table policies tying visibility to user_id
+-- See tasks/lessons.md "Supabase auto-enables RLS" entry for full backstory.
+-- ============================================================================
+ALTER TABLE users           DISABLE ROW LEVEL SECURITY;
+ALTER TABLE accounts        DISABLE ROW LEVEL SECURITY;
+ALTER TABLE categories      DISABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions    DISABLE ROW LEVEL SECURITY;
+ALTER TABLE commitments     DISABLE ROW LEVEL SECURITY;
+ALTER TABLE liabilities     DISABLE ROW LEVEL SECURITY;
+ALTER TABLE assets          DISABLE ROW LEVEL SECURITY;
+ALTER TABLE asset_snapshots DISABLE ROW LEVEL SECURITY;
+ALTER TABLE goals           DISABLE ROW LEVEL SECURITY;
+ALTER TABLE income_events   DISABLE ROW LEVEL SECURITY;
+ALTER TABLE ingestion_log   DISABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_memory    DISABLE ROW LEVEL SECURITY;
+ALTER TABLE heartbeat       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE request_logs    DISABLE ROW LEVEL SECURITY;
