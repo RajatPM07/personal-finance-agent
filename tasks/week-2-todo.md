@@ -12,7 +12,12 @@
 **Lessons referenced (do NOT repeat):** bout-is-CSV-only, aiogram-handle_signals, Supavisor-username, RLS-auto-enable, CLAUDE.md invariants #2 (`.execute()`), #4 (manual `__parser_version__`), #11 (verify, don't assume).
 
 **Revision history:**
-- **r2 (2026-04-26):** AMEX file format clarified as XLSX (not password-protected PDF). Dropped LLM-AMEX path, dual-model calibration, `pdf2image`/`Pillow`/`poppler` deps, `lib/llm.py` `images` parameter re-add. 12 tasks → 10. AMEX parser becomes deterministic `pandas.read_excel`. ₹200 calibration budget freed; full $5 Anthropic balance reserved for Week 4 reasoning.
+- **r2.1 (2026-04-26, post Task 0):** AMEX fixture inspected. Three Task 4 plan fixes folded inline:
+  - `_parse_date` order updated to `%m/%d/%Y` first (AMEX uses US format on Indian cards, NOT `dd/mm/yyyy`)
+  - `parse()` adds `df.dropna(axis=1, how='all')` after read (AMEX exports a trailing empty 11th column)
+  - `KNOWN_COLUMN_SETS[0]` confirmed sufficient — AMEX header `(Date, Description, Amount, ...)` matches existing entry. No new entry needed.
+  - The verbatim AMEX header tuple + raw fixture preview is captured in `tasks/week-2-preconditions-notes.md` §0.1 (gitignored).
+- r2 (2026-04-26): AMEX file format clarified as XLSX (not password-protected PDF). Dropped LLM-AMEX path, dual-model calibration, `pdf2image`/`Pillow`/`poppler` deps, `lib/llm.py` `images` parameter re-add. 12 tasks → 10.
 - r1 (2026-04-26): initial plan after 4-question brainstorm and locked spec v1.
 
 ---
@@ -1018,13 +1023,19 @@ def _row_from_split(date_str: str, description: str, debit_value, credit_value,
 
 
 def _parse_date(s) -> date:
-    """AMEX India: DD/MM/YYYY. Be permissive — pandas may have already converted to Timestamp."""
+    """AMEX India MyStatement: US `MM/DD/YYYY` format (verified Task 0 §0.1).
+
+    AMEX preserves the merchant-network-side US date convention even on
+    Indian-issued cards. Try US format FIRST. Falls back to ISO + DD-MM-YYYY
+    for tolerance. DO NOT use `dayfirst=True` — that would mis-parse
+    ambiguous dates (e.g. '03/05/2026' as May 3 instead of March 5).
+    """
     if isinstance(s, datetime):
         return s.date()
     if isinstance(s, date):
         return s
     s = str(s).strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
@@ -1067,6 +1078,10 @@ def parse(xlsx_path: Path, password: str | None = None) -> ParseResult:
     pdf_content_hash = _sha256_file(xlsx_path)
 
     df = pd.read_excel(xlsx_path, engine="openpyxl", header=None)
+    # AMEX MyStatement exports include a trailing fully-empty 11th column
+    # (XLSX export artifact). Drop it before further processing — verified
+    # Task 0 §0.1.
+    df = df.dropna(axis=1, how="all")
     header_idx, mapping = find_header_row(df)
 
     rows: list[ParsedRow] = []
