@@ -1526,7 +1526,7 @@ git commit -m "feat(backup): standalone pg_dump + restore drill + launchd schedu
 
 **IMPORTANT:** We determined `bout` does not support ICICI PDFs. A full row-level parser is pushed to Week 2. For Week 1, we just need to prove we can decrypt and extract text from an ICICI PDF.
 
-- [ ] **Step 9.1: Write `tests/test_pdf_smoke.py`**
+- [x] **Step 9.1: Write `tests/test_pdf_smoke.py`**
 
 ```python
 import pytest
@@ -1563,14 +1563,14 @@ def test_pdf_decrypt_and_extract():
 
 Rajat copies a recent ICICI statement. The file is gitignored (`*.pdf` in `.gitignore`).
 
-- [ ] **Step 9.3: Run test**
+- [x] **Step 9.3: Run test**
 
 ```bash
 pytest tests/test_pdf_smoke.py -v
 ```
 Expected: The test passes, proving we can decrypt and read text.
 
-- [ ] **Step 9.4: Commit**
+- [x] **Step 9.4: Commit**
 
 ```bash
 git add tests/test_pdf_smoke.py
