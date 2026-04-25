@@ -56,9 +56,11 @@ strict_optional = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 check_untyped_defs = true
+explicit_package_bases = true
+plugins = ["pydantic.mypy"]
 # Third-party libs without stubs
 [[tool.mypy.overrides]]
-module = ["bout.*", "casparser.*", "mftool.*", "camelot.*", "pdfplumber.*", "pikepdf.*"]
+module = ["bout.*", "casparser.*", "mftool.*", "camelot.*", "pdfplumber.*", "pikepdf.*", "yaml", "yaml.*", "litellm", "litellm.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

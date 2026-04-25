@@ -1,0 +1,39 @@
+pdf_extraction:
+  model: gemini/gemini-2.5-flash
+  fallbacks: [anthropic/claude-sonnet-4-6]
+  stakes: high
+
+merchant_categorization:
+  model: groq/llama-3.3-70b-versatile
+  fallbacks: [gemini/gemini-2.5-flash]
+  stakes: low
+
+income_classification:
+  model: gemini/gemini-2.5-flash
+  fallbacks: []
+  stakes: medium
+
+sql_agent:
+  model: anthropic/claude-sonnet-4-6
+  fallbacks: [gemini/gemini-2.5-pro]
+  stakes: high
+
+affordability_reasoning:
+  model: anthropic/claude-sonnet-4-6
+  fallbacks: [gemini/gemini-2.5-pro]
+  stakes: high
+
+morning_brief:
+  model: gemini/gemini-2.5-flash
+  fallbacks: [groq/llama-3.3-70b-versatile]
+  stakes: low
+
+weekly_review:
+  model: gemini/gemini-2.5-flash
+  fallbacks: [groq/llama-3.3-70b-versatile]
+  stakes: low
+
+embeddings:
+  model: gemini/text-embedding-004
+  fallbacks: []
+  stakes: low
