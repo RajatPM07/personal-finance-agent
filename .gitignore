@@ -40,6 +40,7 @@ logs/
 launchd/*.local.plist
 ~/finance-logs/
 tasks/preconditions-notes.md
+tasks/week-2-preconditions-notes.md
 *.local.sql
 
 # Planning artifacts
