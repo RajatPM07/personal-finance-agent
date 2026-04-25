@@ -63,3 +63,39 @@ icici_cc_9999:
     with patch("builtins.open", mock_open(read_data=fake_yaml)), \
          pytest.raises(AmbiguousCredentialError):
         password_lookup("icici_cc")
+
+
+def test_detect_bank_substring_cc_in_account_returns_none():
+    """Regression: 'icici_account_2026.pdf' has 'cc' as substring of 'account'
+    but does NOT have 'cc' as a standalone token. Must return None.
+    Previously returned 'icici_cc' due to substring matching."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_account_2026.pdf") is None
+    assert detect_bank_from_filename("icici_savings_account_2026_05.pdf") is None
+
+
+def test_password_lookup_value_null_raises():
+    """Regression: credentials.example.yaml ships with `paytm_statement: value: null`.
+    If the user copies the example without filling values in, password_lookup
+    must raise CredentialNotFoundError, not return None."""
+    from skills.finance.ingestion._common import CredentialNotFoundError, password_lookup
+    fake_yaml = """
+icici_cc_1008:
+  pattern: "custom"
+  value: null
+"""
+    with patch("builtins.open", mock_open(read_data=fake_yaml)), \
+         pytest.raises(CredentialNotFoundError):
+        password_lookup("icici_cc")
+
+
+def test_password_lookup_exact_key_missing_raises():
+    """When last4 is supplied but no key matches, raise CredentialNotFoundError."""
+    from skills.finance.ingestion._common import CredentialNotFoundError, password_lookup
+    fake_yaml = """
+other_cc_1008:
+  value: "p"
+"""
+    with patch("builtins.open", mock_open(read_data=fake_yaml)), \
+         pytest.raises(CredentialNotFoundError):
+        password_lookup("icici_cc", last4="1008")

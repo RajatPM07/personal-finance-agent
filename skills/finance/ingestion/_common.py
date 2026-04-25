@@ -6,6 +6,7 @@ from a single source of truth.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -71,19 +72,24 @@ class ValidationResult:
 
 
 def detect_bank_from_filename(filename: str) -> Bank | None:
-    """Pure function. Lowercase + token match.
+    """Pure function. Lowercase + word-boundary token match.
 
-    Returns 'icici_cc' if filename contains 'icici' AND 'cc'.
-    Returns 'amex_cc' if filename contains 'amex' OR 'american'.
-    Returns None if both or neither match.
+    Tokenizes the filename on non-alphanumerics so 'cc' must appear as a
+    standalone token (NOT as a substring of words like 'account' which
+    contains 'cc' as a bigram).
+
+    Returns 'icici_cc' if filename has 'icici' AND 'cc' tokens.
+    Returns 'amex_cc' if filename has 'amex' OR 'american' tokens.
+    Returns None if both ICICI and AMEX tokens appear (ambiguous), or if
+    neither set matches.
     """
     name = filename.lower()
-    has_icici = "icici" in name
-    has_amex = ("amex" in name) or ("american" in name)
-    # If both bank tokens appear in the same filename, it's ambiguous.
+    tokens = set(re.split(r"[^a-z0-9]+", name))
+    has_icici = "icici" in tokens
+    has_amex = ("amex" in tokens) or ("american" in tokens)
     if has_icici and has_amex:
         return None
-    if has_icici and ("cc" in name):
+    if has_icici and ("cc" in tokens):
         return "icici_cc"
     if has_amex:
         return "amex_cc"
@@ -97,10 +103,25 @@ def password_lookup(bank: Bank, last4: str | None = None,
     NB: AMEX in V1 is XLSX without a password — callers should not invoke this
     helper for `bank='amex_cc'`. ICICI is the only V1 caller. The function still
     accepts the bank parameter for forward-compatibility with future
-    password-protected sources.
+    password-protected sources (e.g. when HDFC CC is added later, extend the
+    `Bank` literal here and add `hdfc_cc_<last4>` keys to credentials.yaml).
     """
     with open(credentials_path) as f:
         creds: dict = yaml.safe_load(f) or {}
+
+    def _extract_password(entry: dict, key: str) -> str:
+        """Pull the 'value' field as a non-empty string, or raise CredentialNotFoundError."""
+        if not isinstance(entry, dict):
+            raise CredentialNotFoundError(
+                f"Credential entry '{key}' in {credentials_path} is not a mapping"
+            )
+        pw = entry.get("value")
+        if not isinstance(pw, str) or not pw:
+            raise CredentialNotFoundError(
+                f"Credential entry '{key}' in {credentials_path} has no usable "
+                f"'value' field (got: {pw!r}). Fill it in and retry."
+            )
+        return pw
 
     if last4:
         key = f"{bank}_{last4}"
@@ -108,7 +129,7 @@ def password_lookup(bank: Bank, last4: str | None = None,
             raise CredentialNotFoundError(
                 f"No credential entry for '{key}' in {credentials_path}"
             )
-        return creds[key]["value"]
+        return _extract_password(creds[key], key)
 
     matching = [k for k in creds if k.startswith(f"{bank}_")]
     if not matching:
@@ -120,4 +141,4 @@ def password_lookup(bank: Bank, last4: str | None = None,
             f"Multiple credential entries match '{bank}_*': {matching}. "
             f"Pass last4 to disambiguate."
         )
-    return creds[matching[0]]["value"]
+    return _extract_password(creds[matching[0]], matching[0])
