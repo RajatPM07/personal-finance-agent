@@ -102,8 +102,9 @@ Format: date → pattern → root cause → rule.
 1. After moving a venv, verify with `<new_path>/.venv/bin/python -c "import sys; print(sys.prefix)"` AND `source <new_path>/.venv/bin/activate; python -c "import sys; print(sys.prefix)"` — they MUST match. If not, the safe fix is `python -m venv .venv --clear` then re-`pip install -e ".[dev]"`.
 2. For installs intended for a launchd-supervised app, ALWAYS use the venv's python directly: `<new_path>/.venv/bin/python -m pip install <pkg>` rather than `source ... && pip install` — this guarantees you're targeting the same site-packages launchd will see.
 3. Add a smoke-test step to any task that adds a new dep + restarts launchd: explicitly run `<absolute_venv_python> -c "import <pkg>"` BEFORE the launchctl kickstart.
+4. **Spaces in the new path are a hard fail, not a divergence.** macOS shebangs cannot contain spaces — the kernel takes the first whitespace-delimited token as the interpreter. A venv built at `/Users/rajat/projects/personal-finance-agent/` (no spaces) cannot be relocated to `/Users/rajat/AntiGravity/Personal finance Agent/` and patched in-place: every entry-point script (`pip`, `pre-commit`, `mypy`, `pytest`, ...) breaks with `bad interpreter: /Users/rajat/AntiGravity/Personal`. Sed-fixing shebangs CANNOT work. The only fix is `rm -rf .venv && python3.11 -m venv .venv && pip install -e ".[dev]"` from the spaced path — pip then uses a sh-exec wrapper (`'''exec' "<path>" "$0" "$@"' '''`) that handles spaces correctly.
 
-**Captured as:** This entry. Day-2 fix is to recreate the AntiGravity venv with `--clear` to permanently break the divergence.
+**Captured as:** This entry. AntiGravity venv was recreated 2026-04-26 (commit 302ed16 added the missing `[tool.setuptools] packages = ["skills"]` declaration the rebuild required).
 
 ## 2026-04-26 — supabase-py insert types narrow `dict[str, T]` to `dict[str, object]` and mypy rejects
 
