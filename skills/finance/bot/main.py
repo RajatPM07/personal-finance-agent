@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
@@ -12,6 +13,8 @@ from aiogram.types import Message, TelegramObject
 from skills.finance.bot.document_handler import handle_document
 from skills.finance.lib.db import adb, service_client
 from skills.finance.lib.settings import settings
+
+ROUTING_YAML_PATH = Path("config/model_routing.yaml")
 
 logger = logging.getLogger(__name__)
 
@@ -63,3 +66,26 @@ async def ping(message: Message) -> None:
 @dp.message(F.document)
 async def _document_handler(message: Message) -> None:
     await handle_document(message, bot=bot)
+
+
+@dp.message(Command("model"))
+async def model_list_handler(message: Message) -> None:
+    """V1 minimal /model command — only `/model list` (read-only).
+    Full /model family (switch, --confirm, A/B mode) deferred to Week 4."""
+    if not _is_rajat(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    subcommand = parts[1].strip().lower() if len(parts) > 1 else "list"
+
+    if subcommand != "list":
+        await message.answer(
+            f"`/model {subcommand}` is not yet supported. Only `/model list` is available in Week 2. "
+            "Full command family lands in Week 4.",
+            parse_mode="Markdown",
+        )
+        return
+
+    with open(ROUTING_YAML_PATH) as f:
+        yaml_text = f.read()
+    await message.answer(f"```yaml\n{yaml_text}\n```", parse_mode="Markdown")

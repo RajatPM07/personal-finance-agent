@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 
 def test_heartbeat_middleware_calls_execute():
@@ -26,3 +26,31 @@ def test_heartbeat_middleware_calls_execute():
     insert_mock.assert_called_once()
     # The critical assertion — if this fails, the heartbeat is silently no-op'ing
     execute_mock.assert_called_once()
+
+
+def test_model_list_command_returns_yaml():
+    from skills.finance.bot.main import model_list_handler
+    fake_message = MagicMock(chat=MagicMock(id=42), text="/model list")
+    fake_message.answer = AsyncMock()
+
+    fake_yaml = "pdf_extraction:\n  model: gemini/gemini-2.5-flash\n"
+    with patch("skills.finance.bot.main.settings",
+               MagicMock(telegram_chat_id_rajat="42")), \
+         patch("builtins.open", mock_open(read_data=fake_yaml)):
+        asyncio.run(model_list_handler(fake_message))
+
+    fake_message.answer.assert_called_once()
+    args, kwargs = fake_message.answer.call_args
+    text = args[0] if args else kwargs.get("text", "")
+    assert "pdf_extraction" in text
+    assert "gemini/gemini-2.5-flash" in text
+
+
+def test_model_list_rejects_non_rajat():
+    from skills.finance.bot.main import model_list_handler
+    fake_message = MagicMock(chat=MagicMock(id=999), text="/model list")
+    fake_message.answer = AsyncMock()
+    with patch("skills.finance.bot.main.settings",
+               MagicMock(telegram_chat_id_rajat="42")):
+        asyncio.run(model_list_handler(fake_message))
+    fake_message.answer.assert_not_called()
