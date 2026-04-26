@@ -23,6 +23,7 @@ Notes on aiogram 3.27.0:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
 
@@ -31,6 +32,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from skills.finance.bot.main import bot, dp
+from skills.finance.ingestion import folder_watcher
 from skills.finance.lib.logging_setup import configure_logging
 from skills.finance.monitoring.health import app as fastapi_app
 from skills.finance.monitoring.heartbeat import (
@@ -87,6 +89,14 @@ async def _run_bot(stop_event: asyncio.Event) -> None:
     await bot.session.close()
 
 
+async def _wait_then_cancel(stop_event: asyncio.Event, task: asyncio.Task) -> None:
+    """Cancel `task` when stop_event is set."""
+    await stop_event.wait()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 async def main() -> None:
     configure_logging()
     stop_event = asyncio.Event()
@@ -98,8 +108,14 @@ async def main() -> None:
     sched.start()
     logger.info("scheduler started; jobs=%s", [j.id for j in sched.get_jobs()])
 
+    watcher_task = asyncio.create_task(folder_watcher.run())
+
     try:
-        await asyncio.gather(_run_bot(stop_event), _run_http(stop_event))
+        await asyncio.gather(
+            _run_bot(stop_event),
+            _run_http(stop_event),
+            _wait_then_cancel(stop_event, watcher_task),
+        )
     finally:
         logger.info("shutting down: cancelling scheduler")
         sched.shutdown(wait=False)
