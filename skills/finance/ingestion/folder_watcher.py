@@ -69,7 +69,11 @@ async def _send_summary(
     log_entry: dict[str, Any],
     parse_result: ParseResult,
 ) -> None:
-    """Send a per-statement summary message to the main bot."""
+    """Send a per-statement summary message to the main bot.
+
+    Plain text — no parse_mode. Filenames contain underscores which Telegram's
+    Markdown parser treats as italic markers and rejects on imbalance.
+    """
     from skills.finance.bot.main import bot as main_bot
     status = log_entry["status"]
     if status == "success":
@@ -77,8 +81,8 @@ async def _send_summary(
         annotation = ""
         if derived:
             annotation = (
-                "\n_Note: declared totals derived from row sums; validator "
-                "effectively skipped (no Total row in source)._"
+                "\nNote: declared totals derived from row sums; validator "
+                "effectively skipped (no Total row in source)."
             )
         text = (
             f"📥 {bank.upper().replace('_', ' ')} {filename} ingested\n"
@@ -87,7 +91,7 @@ async def _send_summary(
             f"{annotation}"
         )
         await main_bot.send_message(
-            chat_id=settings.telegram_chat_id_rajat, text=text, parse_mode="Markdown",
+            chat_id=settings.telegram_chat_id_rajat, text=text,
         )
     elif status == "skipped_duplicate":
         await main_bot.send_message(
@@ -144,7 +148,10 @@ async def handle_new_file(file_path: Path) -> None:
     if bank == "icici_cc":
         try:
             password = await asyncio.to_thread(password_lookup, bank)
-        except (AmbiguousCredentialError, CredentialNotFoundError) as e:
+        except (AmbiguousCredentialError, CredentialNotFoundError, FileNotFoundError) as e:
+            # FileNotFoundError covers the case where credentials.yaml itself
+            # is absent — surface as a normal alert rather than a silent
+            # coroutine crash.
             logger.exception("password lookup failed for %s", bank)
             rejected = file_path.parent / f"{name}.rejected"
             await asyncio.to_thread(file_path.rename, rejected)
