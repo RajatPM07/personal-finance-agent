@@ -89,3 +89,28 @@ Format: date → pattern → root cause → rule.
 3. Don't trust the Supabase dashboard's "RLS: Disabled" column at face value. Verify with `SELECT relrowsecurity FROM pg_class WHERE relnamespace = 'public'::regnamespace;` if there's any doubt.
 
 **Captured as:** 14× `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` appended to `migrations/001_init.sql`; positive-read assertions added to `migrations/002_verify_readonly.sql`; this entry.
+
+## 2026-04-26 — Activation script + plist path mismatch when a venv directory is moved (or copied via project relocation)
+
+**Pattern:** If you copy/move a Python venv directory to a new location (e.g. project moved from `/Users/rajat/projects/...` to `/Users/rajat/AntiGravity/...`), the `bin/activate` script and `pyvenv.cfg` keep hard-coding the **original** path. Sourcing `.venv/bin/activate` from the new location silently activates the OLD venv. But invoking `.venv/bin/python` directly (e.g. from launchd plist) uses the NEW location's site-packages — they're divergent installs.
+
+**Symptom:** `pip install <pkg>` from inside `cd new_dir; source .venv/bin/activate` succeeds — but the launchd-supervised app crashes with `ModuleNotFoundError: No module named '<pkg>'` because launchd invokes `.venv/bin/python` directly (resolves to NEW venv), while `pip install` went into the OLD venv that `activate` redirected to.
+
+**Discovery:** Caught at Task 9.6 (folder_watcher startup verification) — pytest passed locally, but launchctl restart loop-crashed with `ModuleNotFoundError: No module named 'watchdog'`. `cat .venv/bin/activate | grep VIRTUAL_ENV` showed the old project path; `cat .venv/pyvenv.cfg` showed `command = ... -m venv /Users/rajat/projects/...`.
+
+**Rule:**
+1. After moving a venv, verify with `<new_path>/.venv/bin/python -c "import sys; print(sys.prefix)"` AND `source <new_path>/.venv/bin/activate; python -c "import sys; print(sys.prefix)"` — they MUST match. If not, the safe fix is `python -m venv .venv --clear` then re-`pip install -e ".[dev]"`.
+2. For installs intended for a launchd-supervised app, ALWAYS use the venv's python directly: `<new_path>/.venv/bin/python -m pip install <pkg>` rather than `source ... && pip install` — this guarantees you're targeting the same site-packages launchd will see.
+3. Add a smoke-test step to any task that adds a new dep + restarts launchd: explicitly run `<absolute_venv_python> -c "import <pkg>"` BEFORE the launchctl kickstart.
+
+**Captured as:** This entry. Day-2 fix is to recreate the AntiGravity venv with `--clear` to permanently break the divergence.
+
+## 2026-04-26 — supabase-py insert types narrow `dict[str, T]` to `dict[str, object]` and mypy rejects
+
+**Pattern:** Building a heterogeneous-value dict literal (mixed str/int/None values) and passing it to `service_client().table(...).insert(d)` fails mypy with `Argument 1 ... has incompatible type "dict[str, object]"; expected "JSON"`. mypy infers the dict as `dict[str, object]` because of the value-type variance; supabase-py's stub wants a more specific JSON type.
+
+**Fix:** Annotate the dict literal explicitly: `log_row: dict[str, Any] = { ... }`. The runtime behavior is identical; the explicit `Any` widens the value type so the JSON union matches.
+
+**Where it bit:** `skills/finance/ingestion/pipeline.py` — both `_log_validation_failure` and `_log_success` construct ingestion_log rows with mixed types.
+
+**Captured as:** Annotation added to both helpers. Apply the same annotation pattern proactively for any future Supabase insert/upsert payload that mixes str + int + None.
