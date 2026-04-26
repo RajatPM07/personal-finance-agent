@@ -80,12 +80,11 @@ async def model_list_handler(message: Message) -> None:
 
     if subcommand != "list":
         await message.answer(
-            f"`/model {subcommand}` is not yet supported. Only `/model list` is available in Week 2. "
-            "Full command family lands in Week 4.",
-            parse_mode="Markdown",
+            f"/model {subcommand} is not yet supported. Only /model list is available in Week 2. "
+            "Full command family lands in Week 4."
         )
         return
 
     with open(ROUTING_YAML_PATH) as f:
         yaml_text = f.read()
-    await message.answer(f"```yaml\n{yaml_text}\n```", parse_mode="Markdown")
+    await message.answer(yaml_text)

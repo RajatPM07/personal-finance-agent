@@ -72,4 +72,4 @@ async def handle_document(message: Message, bot: Bot) -> None:
     canonical = inbox / _canonical_name(bank, doc.file_name or "unnamed.pdf")
     await bot.download(doc, destination=str(canonical))
     logger.info("saved telegram doc as %s", canonical)
-    await message.answer(f"Saved as `{canonical.name}` — processing.", parse_mode="Markdown")
+    await message.answer(f"Saved as {canonical.name} — processing.")
