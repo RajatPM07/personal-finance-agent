@@ -5,10 +5,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, TelegramObject
 
+from skills.finance.bot.document_handler import handle_document
 from skills.finance.lib.db import adb, service_client
 from skills.finance.lib.settings import settings
 
@@ -57,3 +58,8 @@ async def ping(message: Message) -> None:
     if not _is_rajat(message):
         return
     await message.answer("pong")
+
+
+@dp.message(F.document)
+async def _document_handler(message: Message) -> None:
+    await handle_document(message, bot=bot)
