@@ -38,6 +38,7 @@ from skills.finance.monitoring.health import app as fastapi_app
 from skills.finance.monitoring.heartbeat import (
     check_stale_components_job,
     ping_external_watchdog_job,
+    self_ping_telegram_bot_job,
 )
 
 logger = logging.getLogger("pfa.app")
@@ -55,9 +56,17 @@ def _build_scheduler() -> AsyncIOScheduler:
         IntervalTrigger(minutes=15),
         id="stale_check",
     )
-    # Note: NO "telegram_bot" heartbeat writer here — the bot writes its own
-    # heartbeat via middleware (skills/finance/bot/main.py). This means the
-    # heartbeat reflects bot health, not scheduler health.
+    # telegram_bot heartbeat is written from two places:
+    # - per-message middleware in bot/main.py (signals user-activity-driven liveness)
+    # - self_ping_telegram_bot_job below (signals connection liveness during quiet
+    #   periods, so the 30-min stale-checker doesn't false-positive at night)
+    # Interval 10m gives ~3 chances to recover before the 30m stale threshold.
+    sched.add_job(
+        self_ping_telegram_bot_job,
+        IntervalTrigger(minutes=10),
+        id="bot_self_ping",
+        args=[bot],
+    )
     # Note: daily pg_dump backup is NOT scheduled here. It runs as a separate
     # launchd job (com.rajat.pfa.backup.plist) so it survives app restarts and
     # cannot block the async event loop.

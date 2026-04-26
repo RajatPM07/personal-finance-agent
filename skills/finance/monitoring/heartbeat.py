@@ -14,12 +14,16 @@ import asyncio
 import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import requests
 
 from skills.finance.lib.db import adb, service_client
 from skills.finance.lib.settings import settings
 from skills.finance.monitoring.alerts import send_alert
+
+if TYPE_CHECKING:
+    from aiogram import Bot
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_STALE_MINUTES = 30
@@ -60,6 +64,40 @@ async def check_stale_components_job() -> None:
     stale = find_stale_components(latest.values(), now=datetime.now(tz=UTC))
     if stale:
         await send_alert(f"Stale heartbeat for: {', '.join(stale)}")
+
+
+async def self_ping_telegram_bot_job(bot: Bot) -> None:
+    """Verify Telegram API connectivity and refresh telegram_bot heartbeat.
+
+    The per-message middleware in bot/main.py only fires on user activity, so
+    long quiet periods would age the latest heartbeat past HEARTBEAT_STALE_MINUTES
+    and trigger false-positive stale alerts. This job calls `bot.get_me()` (a
+    cheap GET against api.telegram.org) every 10 minutes; success means the
+    bot's connection is genuinely alive and we record `status='ok'`. Failure
+    records `status='failed'` so the stale-checker still alerts on a real
+    outage rather than being silenced by a stale-but-recent 'ok' row.
+    """
+    status = "ok"
+    error_msg: str | None = None
+    try:
+        await bot.get_me()
+    except Exception as e:  # noqa: BLE001
+        status = "failed"
+        error_msg = str(e)[:500]
+        logger.warning("telegram bot self-ping failed: %s", e)
+
+    payload = {
+        "component": "telegram_bot",
+        "status": status,
+        "last_ping": datetime.now(tz=UTC).isoformat(),
+        "error_msg": error_msg,
+    }
+    try:
+        await adb(
+            lambda: service_client().table("heartbeat").insert(payload).execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("self-ping heartbeat write failed: %s", e)
 
 
 async def ping_external_watchdog_job() -> None:
