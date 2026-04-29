@@ -19,7 +19,7 @@ import yaml
 # V2 onboarding will move this to settings.py when Ayushi is added.
 RAJAT_USER_ID: str = "00000000-0000-0000-0000-000000000001"
 
-Bank = Literal["icici_cc", "amex_cc"]
+Bank = Literal["icici_cc", "amex_cc", "paytm_upi"]
 
 
 class AmbiguousCredentialError(Exception):
@@ -38,19 +38,31 @@ class ParsedRow:
     direction: Literal["in", "out"]
     raw_merchant: str
     source_row_ordinal: int                # 1..N within the file, deterministic per parser
+    # Paytm-only fields (W3.1). ICICI/AMEX rows leave these at defaults.
+    is_amex_routed: bool = False           # True → row is dropped at insert (D1 dual-entry skip)
+    is_self_transfer: bool = False         # True → Paytm 'Money sent to ...' row to a known own-handle (D2)
+    category_hint: str | None = None       # Paytm's pre-tagged category, emoji-stripped (D4)
 
 
 @dataclass(frozen=True)
 class ParseResult:
     rows: list[ParsedRow]
     declared_totals: dict                  # {'total_spends': Decimal, 'total_credits': Decimal,
-                                           #  'closing_balance': Decimal | None}
+                                           #  'closing_balance': Decimal | None,
+                                           #  '_derived_from_rows': bool}
     pdf_content_hash: str                  # sha256 of source FILE bytes (PDF or XLSX);
                                            #   threaded into import_hash. Field name kept as
                                            #   pdf_content_hash for schema compatibility with
                                            #   transactions table; despite the name, also used
                                            #   for XLSX content hashing.
     parser_version: str                    # e.g. "icici-cc/v1"
+
+    def insertable_rows(self) -> list[ParsedRow]:
+        """Rows the pipeline should persist. Excludes is_amex_routed=True rows
+        (D1: same spend already captured via the AMEX statement). Self-transfers
+        ARE in the insertable set (D2: ingest all transactions even when
+        excluded from the published-summary count)."""
+        return [r for r in self.rows if not r.is_amex_routed]
 
 
 @dataclass(frozen=True)

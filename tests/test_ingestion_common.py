@@ -99,3 +99,76 @@ other_cc_1008:
     with patch("builtins.open", mock_open(read_data=fake_yaml)), \
          pytest.raises(CredentialNotFoundError):
         password_lookup("icici_cc", last4="1008")
+
+
+# W3.1 Paytm additions ----------------------------------------------------------
+
+def test_bank_literal_includes_paytm_upi():
+    """Paytm UPI added in W3.1 — type-level guard against typos."""
+    from typing import get_args
+
+    from skills.finance.ingestion._common import Bank
+    assert "paytm_upi" in get_args(Bank)
+    assert "icici_cc" in get_args(Bank)
+    assert "amex_cc" in get_args(Bank)
+
+
+def test_parsed_row_accepts_optional_paytm_fields():
+    """New optional fields default safely so ICICI/AMEX construction is unchanged."""
+    from datetime import date
+    from decimal import Decimal
+
+    from skills.finance.ingestion._common import ParsedRow
+
+    # Minimal construction (existing parsers' usage) still works:
+    r = ParsedRow(
+        txn_date=date(2026, 4, 29),
+        amount=Decimal("100"),
+        direction="out",
+        raw_merchant="Test",
+        source_row_ordinal=1,
+    )
+    assert r.is_amex_routed is False
+    assert r.is_self_transfer is False
+    assert r.category_hint is None
+
+    # Paytm-style construction sets the new fields:
+    r2 = ParsedRow(
+        txn_date=date(2026, 4, 29),
+        amount=Decimal("500"),
+        direction="out",
+        raw_merchant="Some Merchant",
+        source_row_ordinal=2,
+        is_amex_routed=True,
+        is_self_transfer=False,
+        category_hint="Food",
+    )
+    assert r2.is_amex_routed is True
+    assert r2.category_hint == "Food"
+
+
+def test_parse_result_insertable_rows_excludes_amex_routed():
+    from datetime import date
+    from decimal import Decimal
+
+    from skills.finance.ingestion._common import ParsedRow, ParseResult
+
+    keep = ParsedRow(
+        txn_date=date(2026, 4, 29), amount=Decimal("100"), direction="out",
+        raw_merchant="Keep", source_row_ordinal=1,
+    )
+    drop = ParsedRow(
+        txn_date=date(2026, 4, 29), amount=Decimal("200"), direction="out",
+        raw_merchant="Drop", source_row_ordinal=2, is_amex_routed=True,
+    )
+
+    pr = ParseResult(
+        rows=[keep, drop],
+        declared_totals={"total_spends": Decimal("100"), "total_credits": Decimal("0"),
+                         "closing_balance": None, "_derived_from_rows": False},
+        pdf_content_hash="0" * 64,
+        parser_version="test/v1",
+    )
+    insertable = pr.insertable_rows()
+    assert len(insertable) == 1
+    assert insertable[0].raw_merchant == "Keep"
