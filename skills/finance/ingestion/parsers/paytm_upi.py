@@ -22,7 +22,10 @@ Three Paytm-specific behaviors:
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Any
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -54,3 +57,56 @@ def classify_self_transfer(
         return False
     other = str(other_transaction_details)
     return any(h in other for h in own_handles)
+
+
+# Summary-sheet parsing ------------------------------------------------------
+
+def _decimal_from_indian_str(s: Any) -> Decimal:
+    """Convert '1,23,456.78' or 1234.56 or Decimal(...) → Decimal('1234.56').
+    Tolerates Indian-style multi-comma thousand/lakh separators."""
+    if isinstance(s, Decimal):
+        return s
+    cleaned = str(s).replace(",", "").strip()
+    return Decimal(cleaned)
+
+
+_SUMMARY_LABELS = {
+    "paid_amount": "Money Paid (Amount in Rs.)",
+    "paid_count": "Money Paid (No. of Payments)",
+    "recv_amount": "Money Received (Amount in Rs.)",
+    "recv_count": "Money Received (No. of Payments)",
+}
+
+
+def _read_summary_totals(summary_df: pd.DataFrame) -> dict:
+    """Scan the Summary sheet for the four declared-total labels (label-scan
+    rather than fixed-row indexing in case Paytm shifts the layout). Returns:
+        {paid_amount: Decimal, paid_count: int,
+         recv_amount: Decimal, recv_count: int}
+    Raises ParserError if any of the four labels is not found.
+    """
+    found: dict = {}
+    for i in range(len(summary_df)):
+        label = summary_df.iat[i, 0]
+        if label is None:
+            continue
+        label_str = str(label).strip()
+        for key, target in _SUMMARY_LABELS.items():
+            if key in found:
+                continue
+            if label_str == target:
+                value = summary_df.iat[i, 1]
+                if key.endswith("_amount"):
+                    found[key] = _decimal_from_indian_str(value)
+                else:  # _count
+                    found[key] = int(value)
+                break
+    missing = [k for k in _SUMMARY_LABELS if k not in found]
+    if missing:
+        raise ParserError(
+            f"Paytm Summary sheet missing expected labels: {missing}. "
+            f"Looked for: {list(_SUMMARY_LABELS.values())}. "
+            f"First 15 rows of column A: "
+            f"{[summary_df.iat[i, 0] for i in range(min(15, len(summary_df)))]}"
+        )
+    return found
