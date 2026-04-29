@@ -22,6 +22,7 @@ Three Paytm-specific behaviors:
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -110,3 +111,41 @@ def _read_summary_totals(summary_df: pd.DataFrame) -> dict:
             f"{[summary_df.iat[i, 0] for i in range(min(15, len(summary_df)))]}"
         )
     return found
+
+
+# Direction inference + tag normalization ------------------------------------
+
+_DIRECTION_PREFIXES: dict[str, str] = {
+    "Paid to ": "out",
+    "Money sent to ": "out",
+    "Received from ": "in",
+}
+
+
+def _infer_direction(transaction_details: str) -> str:
+    """Map the Transaction Details column prefix to direction. Raises if the
+    prefix is unknown — Paytm's known prefix list is small and stable; an
+    unknown prefix is a parser-update signal."""
+    for prefix, direction in _DIRECTION_PREFIXES.items():
+        if transaction_details.startswith(prefix):
+            return direction
+    raise ParserError(
+        f"Unknown Paytm Transaction Details prefix: {transaction_details!r}. "
+        f"Known prefixes: {list(_DIRECTION_PREFIXES.keys())}. "
+        f"If Paytm added a new pattern, extend _DIRECTION_PREFIXES."
+    )
+
+
+# Strip leading '#<emoji-or-symbol>' + optional whitespace; keep the label.
+_TAG_PREFIX_RE = re.compile(r"^#\S+\s*")
+
+
+def _strip_tag(tag_value: Any) -> str | None:
+    """Convert Paytm's '#🥘 Food' → 'Food'. Returns None for blank/None input."""
+    if tag_value is None:
+        return None
+    s = str(tag_value).strip()
+    if not s:
+        return None
+    stripped = _TAG_PREFIX_RE.sub("", s).strip()
+    return stripped or None

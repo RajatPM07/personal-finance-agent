@@ -114,3 +114,47 @@ def test_read_summary_totals_raises_when_labels_missing():
     with pytest.raises(ParserError) as exc_info:
         _read_summary_totals(df)
     assert "Money Paid" in str(exc_info.value) or "label" in str(exc_info.value).lower()
+
+
+# _infer_direction + _strip_tag ---------------------------------------------
+
+def test_infer_direction_paid_to():
+    from skills.finance.ingestion.parsers.paytm_upi import _infer_direction
+    assert _infer_direction("Paid to NETC FASTag Recharge") == "out"
+
+
+def test_infer_direction_money_sent_to():
+    from skills.finance.ingestion.parsers.paytm_upi import _infer_direction
+    assert _infer_direction("Money sent to Md Mehboob") == "out"
+
+
+def test_infer_direction_received_from():
+    from skills.finance.ingestion.parsers.paytm_upi import _infer_direction
+    assert _infer_direction("Received from Aayushi Shukla") == "in"
+
+
+def test_infer_direction_unknown_prefix_raises():
+    from skills.finance.ingestion.parsers.paytm_upi import (
+        ParserError,
+        _infer_direction,
+    )
+    with pytest.raises(ParserError) as exc_info:
+        _infer_direction("Refund processed for order 123")
+    assert "unknown" in str(exc_info.value).lower() or "prefix" in str(exc_info.value).lower()
+
+
+def test_strip_paytm_tag_emoji():
+    """Paytm tags like '#🥘 Food' should produce 'Food' as category_hint."""
+    from skills.finance.ingestion.parsers.paytm_upi import _strip_tag
+    assert _strip_tag("#🥘 Food") == "Food"
+    assert _strip_tag("#🛒 Groceries") == "Groceries"
+    assert _strip_tag("#⛽️ Fuel") == "Fuel"
+    assert _strip_tag("#💵 Money Transfer") == "Money Transfer"
+    assert _strip_tag("#🔄 Miscellaneous") == "Miscellaneous"
+
+
+def test_strip_paytm_tag_blank_or_none_returns_none():
+    from skills.finance.ingestion.parsers.paytm_upi import _strip_tag
+    assert _strip_tag(None) is None
+    assert _strip_tag("") is None
+    assert _strip_tag("   ") is None
