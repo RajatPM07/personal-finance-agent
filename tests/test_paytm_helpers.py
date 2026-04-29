@@ -179,3 +179,53 @@ def test_is_amex_routed_handles_none():
     from skills.finance.ingestion.parsers.paytm_upi import _is_amex_routed
     assert _is_amex_routed(None) is False
     assert _is_amex_routed("") is False
+
+
+# _load_own_upi_handles -----------------------------------------------------
+
+def test_load_own_upi_handles_filters_to_upi_type(monkeypatch):
+    """Own UPI handles loaded from accounts where type='upi'. Function uses
+    the sync supabase client directly (parser already runs in worker thread)."""
+    from skills.finance.ingestion.parsers import paytm_upi
+
+    def fake_service_client():
+        class _Resp:
+            data = [
+                {"identifier": "7358467199@ptsbi", "type": "upi"},
+                {"identifier": "secondhandle@upi",  "type": "upi"},
+            ]
+
+        class _Builder:
+            def select(self, *a, **kw): return self
+            def eq(self, *a, **kw): return self
+            def execute(self): return _Resp()
+
+        class _Client:
+            def table(self, name): return _Builder()
+
+        return _Client()
+
+    monkeypatch.setattr(paytm_upi, "service_client", fake_service_client)
+    handles = paytm_upi._load_own_upi_handles()
+    assert handles == ["7358467199@ptsbi", "secondhandle@upi"]
+
+
+def test_load_own_upi_handles_empty_returns_empty_list(monkeypatch):
+    from skills.finance.ingestion.parsers import paytm_upi
+
+    def fake_service_client():
+        class _Resp:
+            data = []
+
+        class _Builder:
+            def select(self, *a, **kw): return self
+            def eq(self, *a, **kw): return self
+            def execute(self): return _Resp()
+
+        class _Client:
+            def table(self, name): return _Builder()
+
+        return _Client()
+
+    monkeypatch.setattr(paytm_upi, "service_client", fake_service_client)
+    assert paytm_upi._load_own_upi_handles() == []

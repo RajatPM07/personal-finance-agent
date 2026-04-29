@@ -28,6 +28,8 @@ from typing import Any
 
 import pandas as pd
 
+from skills.finance.lib.db import service_client
+
 logger = logging.getLogger(__name__)
 
 __parser_version__ = "paytm-upi-xlsx/v1"
@@ -160,3 +162,21 @@ def _is_amex_routed(your_account: Any) -> bool:
     if your_account is None:
         return False
     return "American Express" in str(your_account)
+
+
+def _load_own_upi_handles() -> list[str]:
+    """Read all UPI-typed account identifiers from the `accounts` table.
+
+    Used by parse() to classify 'Money sent to ...' rows as self-transfers
+    when the destination matches one of the user's own handles. Called inside
+    parse() which already runs on a worker thread (folder_watcher dispatch
+    uses asyncio.to_thread), so calling the sync supabase client directly is
+    safe — no `adb()` wrap needed here."""
+    resp = (
+        service_client()
+        .table("accounts")
+        .select("identifier,type")
+        .eq("type", "upi")
+        .execute()
+    )
+    return [r["identifier"] for r in (resp.data or []) if r.get("identifier")]
