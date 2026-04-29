@@ -33,11 +33,13 @@ logger = logging.getLogger(__name__)
 ACCOUNT_IDS: dict[str, UUID] = {
     "icici_cc": UUID("10000000-0000-0000-0000-000000000003"),
     "amex_cc": UUID("10000000-0000-0000-0000-000000000005"),
+    "paytm_upi": UUID("10000000-0000-0000-0000-000000000006"),
 }
 
 EXPECTED_EXTENSION: dict[str, str] = {
     "icici_cc": ".pdf",
     "amex_cc": ".xlsx",
+    "paytm_upi": ".xlsx",
 }
 
 
@@ -54,6 +56,10 @@ async def dispatch_to_parser(
     elif bank == "amex_cc":
         from skills.finance.ingestion.parsers.amex_cc import parse as amex_parse
         parse_result = await asyncio.to_thread(amex_parse, file_path)
+        source = SourceMeta(source="manual_xlsx", source_ref=file_path.name)
+    elif bank == "paytm_upi":
+        from skills.finance.ingestion.parsers.paytm_upi import parse as paytm_parse
+        parse_result = await asyncio.to_thread(paytm_parse, file_path)
         source = SourceMeta(source="manual_xlsx", source_ref=file_path.name)
     else:
         raise ValueError(f"Unknown bank: {bank}")
