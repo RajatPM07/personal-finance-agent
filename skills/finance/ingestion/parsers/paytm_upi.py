@@ -149,3 +149,14 @@ def _strip_tag(tag_value: Any) -> str | None:
         return None
     stripped = _TAG_PREFIX_RE.sub("", s).strip()
     return stripped or None
+
+
+def _is_amex_routed(your_account: Any) -> bool:
+    """A Paytm row's `Your Account` column tells which underlying source funded
+    the payment. When the source is the user's AMEX CC, the same spend ALSO
+    appears in the AMEX statement (via the generic 'Paytm' merchant). To avoid
+    double-counting, the pipeline drops these rows at insert. Spec D1.
+    """
+    if your_account is None:
+        return False
+    return "American Express" in str(your_account)

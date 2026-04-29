@@ -158,3 +158,24 @@ def test_strip_paytm_tag_blank_or_none_returns_none():
     assert _strip_tag(None) is None
     assert _strip_tag("") is None
     assert _strip_tag("   ") is None
+
+
+# _is_amex_routed -----------------------------------------------------------
+
+def test_is_amex_routed_true_for_amex():
+    from skills.finance.ingestion.parsers.paytm_upi import _is_amex_routed
+    assert _is_amex_routed("American Express Credit Card") is True
+
+
+def test_is_amex_routed_false_for_other_accounts():
+    from skills.finance.ingestion.parsers.paytm_upi import _is_amex_routed
+    assert _is_amex_routed("HDFC Bank") is False
+    assert _is_amex_routed("ICICI Bank") is False
+    assert _is_amex_routed("UPI Linked Bank") is False
+    assert _is_amex_routed("Other UPI Apps") is False
+
+
+def test_is_amex_routed_handles_none():
+    from skills.finance.ingestion.parsers.paytm_upi import _is_amex_routed
+    assert _is_amex_routed(None) is False
+    assert _is_amex_routed("") is False
