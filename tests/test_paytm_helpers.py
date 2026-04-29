@@ -143,6 +143,23 @@ def test_infer_direction_unknown_prefix_raises():
     assert "unknown" in str(exc_info.value).lower() or "prefix" in str(exc_info.value).lower()
 
 
+def test_infer_direction_falls_back_to_amount_sign():
+    """Real fixture had an orphan row 'Vikhyat Sharma' with Amount='+10.00' —
+    no recognizable prefix but the signed amount tells us direction."""
+    from skills.finance.ingestion.parsers.paytm_upi import _infer_direction
+    assert _infer_direction("Vikhyat Sharma", amount_str="+10.00") == "in"
+    assert _infer_direction("some weird text", amount_str="-500.00") == "out"
+
+
+def test_infer_direction_unknown_prefix_unsigned_amount_still_raises():
+    from skills.finance.ingestion.parsers.paytm_upi import (
+        ParserError,
+        _infer_direction,
+    )
+    with pytest.raises(ParserError):
+        _infer_direction("Mystery row", amount_str="500.00")  # no sign
+
+
 def test_strip_paytm_tag_emoji():
     """Paytm tags like '#🥘 Food' should produce 'Food' as category_hint."""
     from skills.finance.ingestion.parsers.paytm_upi import _strip_tag
