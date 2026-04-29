@@ -59,6 +59,7 @@ def _build_insert_row(
         "source_row_ordinal": r.source_row_ordinal,
         "parser_version": pr.parser_version,
         "import_hash": h,
+        "category_hint": r.category_hint,    # W3.1: Paytm-only today; NULL for ICICI/AMEX
     }
 
 
@@ -129,7 +130,7 @@ async def ingest(
 
     rows = [
         _build_insert_row(r, account_id, parse_result, source_meta)
-        for r in parse_result.rows
+        for r in parse_result.insertable_rows()
     ]
 
     response = await adb(
