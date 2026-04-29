@@ -27,7 +27,7 @@ import re
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -219,7 +219,10 @@ def _load_own_upi_handles() -> list[str]:
         .eq("type", "upi")
         .execute()
     )
-    return [r["identifier"] for r in (resp.data or []) if r.get("identifier")]
+    # supabase-py types resp.data as list[JSON]; the items are dicts in
+    # practice — cast so mypy can resolve `r.get(...)` (lessons.md 2026-04-26).
+    records = cast(list[dict[str, Any]], resp.data or [])
+    return [r["identifier"] for r in records if r.get("identifier")]
 
 
 # parse() integration --------------------------------------------------------
