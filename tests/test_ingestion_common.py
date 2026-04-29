@@ -147,6 +147,30 @@ def test_parsed_row_accepts_optional_paytm_fields():
     assert r2.category_hint == "Food"
 
 
+def test_detect_bank_paytm_canonical():
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("paytm_upi_apr25_mar26.xlsx") == "paytm_upi"
+
+
+def test_detect_bank_paytm_loose():
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("Paytm_UPI_Statement_2026.xlsx") == "paytm_upi"
+    assert detect_bank_from_filename("my_paytm_export.xlsx") == "paytm_upi"
+
+
+def test_detect_bank_paytm_does_not_break_existing():
+    """Regression: ICICI + AMEX detection unchanged."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_cc_2026_04.pdf") == "icici_cc"
+    assert detect_bank_from_filename("amex_cc_2026_04.xlsx") == "amex_cc"
+
+
+def test_detect_bank_ambiguous_paytm_plus_icici_returns_none():
+    """If a filename mentions both Paytm and ICICI it's ambiguous."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("paytm_icici_combined.xlsx") is None
+
+
 def test_parse_result_insertable_rows_excludes_amex_routed():
     from datetime import date
     from decimal import Decimal

@@ -90,21 +90,28 @@ def detect_bank_from_filename(filename: str) -> Bank | None:
     standalone token (NOT as a substring of words like 'account' which
     contains 'cc' as a bigram).
 
-    Returns 'icici_cc' if filename has 'icici' AND 'cc' tokens.
-    Returns 'amex_cc' if filename has 'amex' OR 'american' tokens.
-    Returns None if both ICICI and AMEX tokens appear (ambiguous), or if
-    neither set matches.
+    Returns:
+      'icici_cc'  if filename has 'icici' AND 'cc' tokens.
+      'amex_cc'   if filename has 'amex' OR 'american' tokens.
+      'paytm_upi' if filename has 'paytm' token.
+      None        if multiple bank-family tokens collide (ambiguous), or no
+                  family matches.
     """
     name = filename.lower()
     tokens = set(re.split(r"[^a-z0-9]+", name))
     has_icici = "icici" in tokens
     has_amex = ("amex" in tokens) or ("american" in tokens)
-    if has_icici and has_amex:
-        return None
+    has_paytm = "paytm" in tokens
+
+    if sum([has_icici, has_amex, has_paytm]) > 1:
+        return None  # ambiguous — multiple bank families match
+
     if has_icici and ("cc" in tokens):
         return "icici_cc"
     if has_amex:
         return "amex_cc"
+    if has_paytm:
+        return "paytm_upi"
     return None
 
 
