@@ -71,7 +71,10 @@ def test_detect_bank_substring_cc_in_account_returns_none():
     Previously returned 'icici_cc' due to substring matching."""
     from skills.finance.ingestion._common import detect_bank_from_filename
     assert detect_bank_from_filename("icici_account_2026.pdf") is None
-    assert detect_bank_from_filename("icici_savings_account_2026_05.pdf") is None
+    # Note: 'icici_savings_account_2026_05.pdf' returns 'icici_savings' under
+    # W3.4 — the 'savings' token is a clear disambiguator. Pre-W3.4 this test
+    # asserted None because savings detection didn't exist yet.
+    assert detect_bank_from_filename("icici_savings_account_2026_05.pdf") == "icici_savings"
 
 
 def test_password_lookup_value_null_raises():
@@ -231,6 +234,34 @@ def test_decimal_from_indian_str_in_common():
     assert _decimal_from_indian_str(Decimal("100")) == Decimal("100")
     assert _decimal_from_indian_str("-1,234.56") == Decimal("-1234.56")
     assert _decimal_from_indian_str("+5,000.00") == Decimal("5000.00")
+
+
+def test_detect_bank_icici_savings_canonical():
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_savings_2026_02.pdf") == "icici_savings"
+
+
+def test_detect_bank_icici_sav_short():
+    """Short 'sav' token also matches (defensive)."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_sav_2026_02.pdf") == "icici_savings"
+
+
+def test_detect_bank_icici_cc_still_works_after_savings_added():
+    """Regression: existing icici_cc detection unaffected."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_cc_2026_04.pdf") == "icici_cc"
+
+
+def test_detect_bank_icici_alone_returns_none():
+    """Bare 'icici' filename without disambiguator → None."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_2026_02.pdf") is None
+
+
+def test_detect_bank_ambiguous_icici_savings_and_cc_returns_none():
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_cc_savings_combined.pdf") is None
 
 
 def test_detect_bank_paytm_canonical():

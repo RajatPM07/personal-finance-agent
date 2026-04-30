@@ -103,28 +103,36 @@ def _decimal_from_indian_str(s: Any) -> Decimal:
 def detect_bank_from_filename(filename: str) -> Bank | None:
     """Pure function. Lowercase + word-boundary token match.
 
-    Tokenizes the filename on non-alphanumerics so 'cc' must appear as a
-    standalone token (NOT as a substring of words like 'account' which
-    contains 'cc' as a bigram).
-
     Returns:
-      'icici_cc'  if filename has 'icici' AND 'cc' tokens.
-      'amex_cc'   if filename has 'amex' OR 'american' tokens.
-      'paytm_upi' if filename has 'paytm' token.
-      None        if multiple bank-family tokens collide (ambiguous), or no
-                  family matches.
+      'icici_cc'        if filename has 'icici' AND 'cc' tokens (no 'savings'/'sav').
+      'icici_savings'   if filename has 'icici' AND ('savings' OR 'sav') (no 'cc').
+      'amex_cc'         if filename has 'amex' OR 'american' tokens.
+      'paytm_upi'       if filename has 'paytm' token.
+      None              if multiple bank-family tokens collide (ambiguous), or no
+                        family matches, or 'icici' appears without a disambiguator.
     """
     name = filename.lower()
     tokens = set(re.split(r"[^a-z0-9]+", name))
     has_icici = "icici" in tokens
     has_amex = ("amex" in tokens) or ("american" in tokens)
     has_paytm = "paytm" in tokens
+    has_savings = ("savings" in tokens) or ("sav" in tokens)
+    has_cc = "cc" in tokens
 
+    # Multi-family ambiguity check (e.g., paytm + amex)
     if sum([has_icici, has_amex, has_paytm]) > 1:
-        return None  # ambiguous — multiple bank families match
+        return None
 
-    if has_icici and ("cc" in tokens):
-        return "icici_cc"
+    if has_icici:
+        # ICICI requires CC vs SAVINGS unambiguously
+        if has_cc and has_savings:
+            return None  # ambiguous — both specifiers
+        if has_cc:
+            return "icici_cc"
+        if has_savings:
+            return "icici_savings"
+        return None  # bare 'icici' — needs disambiguator
+
     if has_amex:
         return "amex_cc"
     if has_paytm:
