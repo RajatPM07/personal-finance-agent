@@ -1,13 +1,22 @@
 # LLM Routing — Anthropic Zero-Spend Strategy + SQL-Agent Reviewer Layer
 
-**Status:** Locked v1
-**Date:** 2026-04-30
+**Status:** Locked v2
+**Date:** 2026-04-30 (v1), 2026-04-30 (v2 same-day revision)
 **Supersedes:**
 - Roadmap r2 §2 W3.3 ("Anthropic balance top-up — manual gating task before W3.4 Payslip parser") — replaced by the routing approach in §3 of this doc; no top-up required.
 - `config/model_routing.yaml` comments calling Groq Llama the "documented-degraded fallback" — Groq Llama is now the primary; Sonnet fallback stays as last-resort.
 
 **PRD references:** §6.4 (model routing — Sonnet for stakes:high reasoning), §6.5 (data-quality maturity guard for affordability)
 **Impacts (when implemented):** W3.4 Payslip parser routing entry, W4.1 SQL agent design, W4.4 Affordability reasoning routing (W4.4 itself is data-gated backlog).
+
+**v1 → v2 changelog (post-review revision):**
+- §4.4 decision rule rewritten: `verdict` (categorical) becomes the primary signal, `confidence` (numeric) is a secondary gate only. Reason: published evidence + reviewer feedback that LLMs are poorly calibrated when self-reporting numeric confidence; verdict-categorical is more robust to confidence-distribution drift.
+- §4.5 sensitivity note added: `schema_excerpt` in judge prompts must not be logged outside `request_logs`'s metadata-only path.
+- §5 calibration: Step 0 (confidence-distribution plot) added as a gate before threshold tuning. If Gemini's confidence clusters narrowly, the threshold defaults to a single low value and verdict-categorical carries the load.
+- §5.3 categories rebalanced: replaced 1 "ambiguous" pair with 1 "genuinely unanswerable" pair (validates the rephrase-to-user surfacing path); added new "negative/edge cases" category × 2 pairs (validates judge can distinguish empty results from broken SQL); dropped 1 "simple aggregate" to keep total at 20.
+- §5.5: explicit caveat that 20-pair scoring is directional, not statistically significant — single misclassification swings recall by 5%.
+- §7: low-balance trigger bumped $2 → $3 for marginally more lead-time. Burn-rate math in chat showed $5 likely lasts 1–2 years; the 60% spent-vs-40% remaining mental model is cleaner.
+- §8: explicit sentence on `affordability_reasoning` — no reviewer in V1 because we lack operational data to design one well. SQL-agent calibration data informs that design when affordability activates (post 60-day data-quality guard).
 
 ## 1. Constraint
 
@@ -104,13 +113,17 @@ First N=3 result rows
     │
     ▼
 [llm("sql_agent_judge", judge_prompt)]   ← Gemini Flash judge (free)
-    │  Returns: { confident: bool, verdict: "ok"|"wrong"|"uncertain", reason: str }
+    │  Returns: { verdict: "ok"|"wrong"|"uncertain", confidence: 0.0–1.0, reason: str }
     │
-    ├── confident && verdict=="ok" ────────────────► render full result to user
+    │  Decision rule (verdict-primary, confidence-secondary; see §4.4):
     │
-    ├── verdict=="wrong" (any confidence) ─────────► retry path (§4.3)
+    ├── verdict == "wrong"     (any confidence) ─────► retry path (§4.3)
     │
-    └── verdict=="uncertain" OR low-confidence ok ─► escalation path (§4.2)
+    ├── verdict == "uncertain" (any confidence) ─────► escalation path (§4.2)
+    │
+    └── verdict == "ok"
+        ├── confidence ≥ threshold ──────────────────► render full result to user
+        └── confidence < threshold ──────────────────► escalation path (§4.2)
 ```
 
 ### 4.2 Escalation path — Anthropic Sonnet strict judge
@@ -160,13 +173,23 @@ New SQL → re-validate → re-run → re-judge (§4.1 from top)
 
 Rate-limit: max 2 retry rounds before surfacing to user. Prevents infinite loops on inherently-ambiguous questions.
 
-### 4.4 Confidence thresholds
+### 4.4 Decision rule + thresholds
 
-| Threshold | Default | Rationale |
+**Primary signal: `verdict` (categorical).** This is the single load-bearing decision input. The judge LLM emits one of three values; each maps to one branch:
+
+- `wrong` → retry path (§4.3)
+- `uncertain` → escalation path (§4.2)
+- `ok` → potentially render, but gated by confidence (below)
+
+**Secondary signal: `confidence` (numeric, 0.0–1.0).** Used **only** as an additional gate when `verdict == "ok"`. If confidence is below threshold, treat as if verdict were "uncertain" and escalate.
+
+Rationale for verdict-primary: published evidence (and the §5 calibration step §5.0) shows LLMs are poorly calibrated when self-reporting numeric confidence — they often cluster near 0.85+ or 0.95+ regardless of actual correctness. Categorical verdict labels are more robust to that distribution drift. Confidence remains useful as a hedge on the "ok" branch but cannot be the sole decision input.
+
+| Knob | Default | Rationale |
 |---|---|---|
-| Gemini judge confidence required to skip Anthropic escalation | **0.85** | Calibrate on the 20-pair test set; tune up/down based on observed precision |
-| Max retry rounds | **2** | Beyond 2, the question is the problem, not the SQL |
-| Anthropic balance "low" warning | **$2.00** | Sends a Telegram alert when balance drops below; user revisits routing |
+| Confidence threshold (gate on `verdict == "ok"`) | **0.85** | Starting point. **Calibration §5.0 may force a different value** — if Gemini's confidence distribution clusters narrowly (say everything is 0.92–0.99), the threshold drops to e.g. 0.5 and verdict-categorical carries all the load. |
+| Max retry rounds | **2** | Beyond 2, the question is the problem, not the SQL — surface "rephrase?" to the user. |
+| Anthropic balance "low" warning | **$3.00** | Telegram alert when balance drops below. At expected burn rate (~$0.001/query), $5 lasts 1–2 years; $3 trigger gives months of lead time before the routing decision becomes urgent. |
 
 These live in `config/sql_agent_review.yaml` (new file) so tuning doesn't require a code commit.
 
@@ -194,9 +217,24 @@ USER:
 
 Same prompt for Gemini and Sonnet judges. The prompt itself is part of the calibration sweep — if Gemini misjudges systematically, the prompt is the first thing to tune.
 
+**Sensitivity note:** the rendered judge prompt contains `schema_excerpt` (real table + column names) and `result_preview` (first 3 rows = real PII). LiteLLM's success_callback in `lib/llm.py` writes only call **metadata** (token counts, model, latency, cost) to `request_logs` — it does **not** persist the rendered prompt body. Treat that boundary as a sensitive invariant: do not extend logging to capture full prompts without an explicit privacy review. `schema_excerpt` and `result_preview` should be considered at the same sensitivity level as `credentials.yaml` for any future logging or instrumentation work.
+
 ## 5. Calibration test set
 
-Before the reviewer layer ships in W4.1, build a small dataset:
+Before the reviewer layer ships in W4.1, build a small dataset and run a two-step gate.
+
+### 5.0 Step 0 — confidence distribution plot (gate before threshold tuning)
+
+Before picking any numeric threshold, run the Gemini judge across the 20-pair set and **plot the distribution of `confidence` values it returns**. The shape of this distribution determines whether the numeric threshold in §4.4 is meaningful at all:
+
+| Distribution shape | Interpretation | Threshold action |
+|---|---|---|
+| **Wide spread** (e.g. roughly uniform 0.3–1.0) | Gemini is differentiating between cases | Tune threshold to maximize precision/recall — 0.85 is a reasonable starting point |
+| **Bimodal** (cluster around 0.5 + cluster around 0.95) | Gemini is making a binary call but coding it as confidence | Threshold at the trough between modes (e.g. 0.75); strong signal |
+| **Tight cluster** (everything is 0.9–0.99) | Gemini is poorly calibrated; numeric confidence carries no information | **Drop the numeric gate**: set threshold to 0.0 so confidence never blocks a "verdict == ok"; rely on the verdict signal alone |
+| **Inverted** (low confidence on easy questions, high on hard) | Calibration bug or prompt bug | Re-tune the judge prompt, repeat Step 0 |
+
+Output of Step 0: a one-paragraph note in the calibration report stating the observed distribution shape and the chosen threshold value (which feeds §4.4). Without this gate, the 0.85 default in §4.4 is essentially arbitrary.
 
 ### 5.1 Layout
 
@@ -230,13 +268,14 @@ tests/sql_agent_calibration/
 ### 5.3 Categories to cover
 
 The 20 pairs should span:
-- **Simple aggregates** (5): "spend on X last month", "total income in Y"
+- **Simple aggregates** (4): "spend on X last month", "total income in Y"
 - **Time-window comparisons** (3): "spend last week vs week before"
 - **Top-N / ranking** (3): "top 10 merchants by amount"
 - **Multi-table joins** (3): "spend by category for credit card vs UPI"
 - **Date math edge cases** (2): "this month so far", "year-to-date"
 - **Aggregation variations** (2): "average daily spend", "median transaction"
-- **Ambiguous / hard** (2): "am I spending more than usual?" (open-ended; expect some `uncertain` verdicts)
+- **Genuinely unanswerable** (1): e.g. "am I spending more than usual?" with <30 days of data, or "what's my projected savings rate?" before income data exists. Expected verdict: `uncertain`. Validates the rephrase-to-user surfacing path — the highest-stakes failure mode would be the system confidently guessing instead of admitting uncertainty.
+- **Negative / edge cases** (2): one pair where Groq generates SQL referencing a table that doesn't exist (validates static validator catches it), and one pair where the SQL is well-formed but returns an empty result set (e.g. "spend on cricket gear last year" when no such data is recorded). Expected: judge correctly distinguishes "empty result from valid SQL" (verdict=`ok`) from "broken SQL" (verdict=`wrong` OR static validator rejects upstream). This separation matters because confusing the two would either spam false-positive retries on legitimate-empty results, or silently render broken SQL outputs as "no data found".
 
 ### 5.4 Scoring
 
@@ -257,6 +296,8 @@ Compute:
 | **Judge recall on wrong SQL** | Of pairs where Groq's SQL is actually wrong, what % did the judge (Gemini OR escalated Sonnet) catch? | ≥ 80% |
 | **Judge precision on right SQL** | Of pairs where the judge said "wrong", what % were actually wrong? (1 - false-positive rate) | ≥ 80% (≤ 20% false-positive rate) |
 | **Escalation rate** | What % of queries triggered Anthropic? | Target ≤ 20%, reject ≥ 40% (too costly) |
+
+**Statistical caveat:** with only 20 pairs, a single misclassification swings recall and precision by ~5%. These metrics are **directional**, not statistically significant — they're a go/no-go gate, not a benchmark. If observed values fall close to a ship threshold (within ±10%), expand the pair set to ~50 before treating the signal as reliable.
 
 ### 5.5 Calibration cost
 
@@ -287,7 +328,7 @@ If any of these fire, reopen the routing decision:
 
 | Trigger | Threshold | Action |
 |---|---|---|
-| Anthropic balance low | < $2.00 | Telegram alert; user picks: top-up, drop strict-judge escalation, or accept Gemini-only judging |
+| Anthropic balance low | < $3.00 | Telegram alert; user picks: top-up, drop strict-judge escalation, or accept Gemini-only judging |
 | Wrong-SQL rate (per `/retry` invocations) | > 20% over 2-week sample | Reopen routing; consider promoting Sonnet back to primary or improving prompts |
 | Judge false-positive rate (user marks judged-wrong as actually right) | > 20% over 30 queries | Tune confidence threshold or judge prompt; recalibrate |
 | Calibration regression | Recall drops below 70% on the test set | Block deploy until prompts retuned |
@@ -313,6 +354,16 @@ This spec lands without code changes. It's the **decision artifact**. Implementa
 - Update `config/model_routing.yaml` comments to mark the W4 flip as scheduled.
 - Append a new entry in `tasks/lessons.md` capturing the cost-vs-quality V1 trade.
 - Update Roadmap r2 status (W3.3 entry now references this spec instead of "manual top-up").
+
+### Note on `affordability_reasoning` (no reviewer in V1)
+
+`affordability_reasoning` is also flipped to Groq Llama primary (per §3 D1) but **does not get a reviewer layer in V1**. Rationale:
+
+1. Affordability is **data-gated** (PRD §6.5 — needs ≥60 days of clean ingested history) and won't activate before late June 2026 at the earliest.
+2. We lack **operational data** to design its reviewer well today. Once SQL-agent's reviewer ships and runs in production, that calibration will inform what affordability's reviewer should look like — query shapes, judge accuracy, escalation patterns, etc.
+3. The §6.5 data-quality maturity guard provides interim protection: affordability refuses to answer confidently (returning `--force` caveated mode only) when data quality is insufficient, which is the entire window before a reviewer would matter.
+
+When affordability is unblocked (post 60-day mark), revisit and write a small follow-up spec specifying its reviewer-layer design grounded in real sql_agent operational data.
 
 ## 9. References
 
