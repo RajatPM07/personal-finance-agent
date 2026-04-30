@@ -1,13 +1,19 @@
 # LLM Routing — Anthropic Zero-Spend Strategy + SQL-Agent Reviewer Layer
 
-**Status:** Locked v2
-**Date:** 2026-04-30 (v1), 2026-04-30 (v2 same-day revision)
+**Status:** Locked v3
+**Date:** 2026-04-30 (v1, v2, v3 — same-day revisions)
 **Supersedes:**
 - Roadmap r2 §2 W3.3 ("Anthropic balance top-up — manual gating task before W3.4 Payslip parser") — replaced by the routing approach in §3 of this doc; no top-up required.
 - `config/model_routing.yaml` comments calling Groq Llama the "documented-degraded fallback" — Groq Llama is now the primary; Sonnet fallback stays as last-resort.
 
 **PRD references:** §6.4 (model routing — Sonnet for stakes:high reasoning), §6.5 (data-quality maturity guard for affordability)
-**Impacts (when implemented):** W3.4 Payslip parser routing entry, W4.1 SQL agent design, W4.4 Affordability reasoning routing (W4.4 itself is data-gated backlog).
+**Impacts (when implemented):** W4.1 SQL agent design, W4.4 Affordability reasoning routing (W4.4 itself is data-gated backlog).
+
+**v2 → v3 changelog (concurrent with `2026-04-30-icici-savings-ingestion-design.md` lock):**
+- **Removed** `payslip_extraction` task entry from §3 (yaml diff). Reason: ICICI Savings parser now specced (W3.4 reframed) captures salary credits as part of the savings statement transaction stream — payslip ingestion is redundant for V1's actual needs (PRD §6.5 affordability uses gross-from-bank-credit at the granularity payslip would have provided; component breakdown / tax detail is V2 if/when tax reasoning activates).
+- **Removed** the §8 implementation-surface subsection "When W3.4 Payslip parser ships". W3.4 itself is reframed from "Payslip parser" to "ICICI Savings parser" in `2026-04-26-v1-roadmap-r2-reprioritization.md` (same commit).
+- **Updated** §6 PRD §6.4 deviation note: clarified that the routing flip + reviewer layer apply to the V1 stakes:high LLM tasks (sql_agent, affordability_reasoning) — payslip is no longer in scope.
+- The decision substance of v2 (verdict-primary judge, confidence-secondary, calibration Step 0, low-balance $3 trigger, etc.) is unchanged.
 
 **v1 → v2 changelog (post-review revision):**
 - §4.4 decision rule rewritten: `verdict` (categorical) becomes the primary signal, `confidence` (numeric) is a secondary gate only. Reason: published evidence + reviewer feedback that LLMs are poorly calibrated when self-reporting numeric confidence; verdict-categorical is more robust to confidence-distribution drift.
@@ -29,7 +35,7 @@
 | # | Decision |
 |---|---|
 | D1 | Flip `sql_agent` and `affordability_reasoning` primary from Anthropic Sonnet → Groq Llama 3.3 70B. Sonnet moves to the fallback slot (last-resort). |
-| D2 | Add new `payslip_extraction` task to `model_routing.yaml`, primary = Gemini 2.5 Flash (vision + structured output, free), fallback = Groq Llama. No Anthropic involvement. |
+| ~~D2~~ | ~~Add new `payslip_extraction` task to `model_routing.yaml`~~ — **DROPPED in v3** (ICICI Savings parser supersedes payslip ingestion for V1; salary credit comes from bank statement directly, not from payslip parsing). |
 | D3 | Build a tiered reviewer layer for `sql_agent` only (B2 from brainstorm): Gemini Flash judges every SQL; if its confidence < threshold, escalate to Anthropic Sonnet for judgment. |
 | D4 | Calibrate the judge before shipping: 20 hand-written NL→SQL pairs run through the pipeline, measure judge precision/recall, ship only if ≥ 80% recall on wrong-SQL detection AND ≤ 20% false-positive rate. |
 | D5 | Document this as a deliberate V1 cost-vs-quality trade against PRD §6.4 (which chose Sonnet for stakes:high). Future review will know it was intentional. |
@@ -57,13 +63,9 @@ affordability_reasoning:
   fallbacks: [anthropic/claude-sonnet-4-6]    # was: [groq/llama-3.3-70b-versatile]
   stakes: high
 
-# NEW — payslip_extraction (W3.4)
-payslip_extraction:
-  model: gemini/gemini-2.5-flash             # vision + structured output, free tier
-  fallbacks: [groq/llama-3.3-70b-versatile]
-  stakes: medium
-  # 2026-04-30: deliberately Gemini-primary not Anthropic. Payslip is a
-  # bounded-extraction task; Gemini Flash handles structured output cleanly.
+# (v3 amendment 2026-04-30: payslip_extraction entry removed — W3.4 reframed to
+#  ICICI Savings ingestion; salary credit comes from the bank statement, not
+#  from payslip parsing. See 2026-04-30-icici-savings-ingestion-design.md.)
 
 # NEW — sql_agent_judge (used by reviewer layer §4)
 sql_agent_judge:
@@ -339,9 +341,8 @@ All triggers should write a `request_logs` row with reason for traceability (W4.
 
 This spec lands without code changes. It's the **decision artifact**. Implementation happens in two places:
 
-### When W3.4 Payslip parser ships:
-- Add `payslip_extraction` entry to `config/model_routing.yaml` per §3.
-- No reviewer layer needed (extraction task, not reasoning task).
+### When W3.4 ships (now: ICICI Savings parser, not Payslip):
+- No routing-spec changes. ICICI Savings is a deterministic parser (pikepdf + pdfplumber/camelot); no LLM involvement at all. See `2026-04-30-icici-savings-ingestion-design.md` for the W3.4 design.
 
 ### When W4.1 SQL agent ships:
 - Apply the §3 yaml diff (sql_agent flip + judge entries).

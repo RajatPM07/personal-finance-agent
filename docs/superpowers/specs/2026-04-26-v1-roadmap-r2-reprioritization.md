@@ -5,7 +5,9 @@
 **Supersedes:** PRD §11 Week 3–5 ordering (original, written pre-Week-1)
 **Triggered by:** Post-Week-2 reprioritization session — drop SMS path from V1, replace investment-API integrations with static asset rows, defer affordability engine until 60-day data threshold.
 
-**2026-04-30 amendment — W3.3 superseded:** the W3.3 task in §2 ("Anthropic balance top-up — gating task before W3.4") is replaced by the routing strategy in `docs/superpowers/specs/2026-04-30-llm-routing-anthropic-zero-spend.md` (locked v2). No top-up is needed; the LLM routing is being restructured so all V1 tasks run on free-tier providers (Gemini Flash + Groq Llama 3.3 70B) with the existing ~$5 Anthropic balance reserved as a last-resort fallback for the SQL-agent reviewer layer. See that spec for the full chain of reasoning + the calibration gate that protects the deviation from PRD §6.4.
+**2026-04-30 amendments:**
+- **W3.3 superseded:** "Anthropic balance top-up — gating task" is replaced by the routing strategy in `docs/superpowers/specs/2026-04-30-llm-routing-anthropic-zero-spend.md` (locked v3). No top-up is needed; the LLM routing is being restructured so all V1 tasks run on free-tier providers (Gemini Flash + Groq Llama 3.3 70B) with the existing ~$5 Anthropic balance reserved as a last-resort fallback for the SQL-agent reviewer layer. See that spec for the full chain of reasoning + the calibration gate that protects the deviation from PRD §6.4.
+- **W3.4 reframed:** "Payslip parser" → **ICICI Savings parser**. Per `docs/superpowers/specs/2026-04-30-icici-savings-ingestion-design.md`, salary credits are captured via the bank statement transaction stream — payslip ingestion is redundant for V1 (component-level breakdown deferred to V2 if/when tax reasoning activates). Same task slot, fundamentally different work; the savings parser is deterministic (no LLM), captures the user's full non-UPI bank activity (rent, utilities, EMIs, salary, ATM, etc.), and resolves the UPI dual-entry overlap with the existing Paytm ingestion via a flag-don't-drop skip rule (D1=A in the savings spec).
 
 ## 1. Why this reordering happened
 
@@ -27,7 +29,7 @@ This document locks the new ordering. Future revisions append a `vN → vN+1 cha
 | W3.1 | **Paytm XLSX parser** — Telegram-drop + folder watcher + `pandas.read_excel` → ingestion pipeline | deterministic | none | ~1.5 days |
 | W3.2 | **Investment static-asset seeding** — verify existing MF row (`Zfunds MF static-₹2L`); add Zerodha row to `assets` (~₹2L). Migration `004_static_assets.sql` | seed | none | ~0.5 day |
 | W3.3 | **~~Anthropic balance top-up — gating task~~** **SUPERSEDED 2026-04-30**: replaced by routing strategy in `docs/superpowers/specs/2026-04-30-llm-routing-anthropic-zero-spend.md` (zero new spend; W3.4 Payslip routes to Gemini Flash; W4.1 sql_agent gets a tiered reviewer layer instead). | — | — | dropped from W3 |
-| W3.4 | **Payslip parser** — Claude Sonnet structured output via Pydantic → `income_events` | LLM | Sonnet calibration | ~2 days |
+| W3.4 | **~~Payslip parser~~** **REFRAMED 2026-04-30 → ICICI Savings parser** — deterministic PDF parser (pikepdf decrypt + pdfplumber/camelot extract) → `transactions`. UPI rows skipped (Paytm passbook is UPI source-of-truth, per `2026-04-30-icici-savings-ingestion-design.md` D1). Adds `txn_mode` column. Salary credits captured here directly; payslip-component breakdown deferred to V2. | deterministic | none | ~2 days |
 | W3.5 | **Readonly DB client** — `psycopg` + `SUPABASE_READONLY_PASSWORD`; Supavisor pooler username format `<role>.<project_ref>` (per lessons.md 2026-04-25). Smoke test: positive-read assertion against seeded `accounts`. | infra | none | ~0.5 day |
 
 **Out of W3 / explicitly deferred:**
