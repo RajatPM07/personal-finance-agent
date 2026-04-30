@@ -133,6 +133,99 @@ def _extract_data_row(line: str) -> ParsedRow | None:
     )
 
 
+# Boundary markers — stop assembly when seeing the nominee block on the last
+# transaction page (so we don't mistakenly grab nominee detail lines as
+# continuations of the last txn).
+_NOMINEE_HEADER_RE = re.compile(
+    r"^ACCOUNT\s+TYPE\s+ACCOUNT\s+NUMBER\s+MICR\s+CODE\s+IFS\s+CODE",
+    re.IGNORECASE,
+)
+_TOTAL_FOOTER_RE = re.compile(r"^\s*Total\s*:", re.IGNORECASE)
+
+
+def _looks_like_header_or_chrome(line: str) -> bool:
+    """Return True for lines that are clearly NOT continuation content.
+    Conservative: when in doubt, return False (treat as continuation)."""
+    upper = line.upper()
+    if upper.startswith("DATE MODE PARTICULARS"):
+        return True
+    if upper.startswith("STATEMENT SUMMARY"):
+        return True
+    if upper.startswith("ACCOUNT HOLDERS"):
+        return True
+    if upper.startswith("ACCOUNT TYPE"):
+        return True
+    if "ICICI BANK LTD" in upper:
+        return True
+    return upper.startswith("PAGE ")
+
+
+def _assemble_rows(lines: list[str]) -> list[ParsedRow]:
+    """Walk a flat list of text lines and build ordinal-numbered ParsedRows.
+
+    For each line, in order:
+      - Data row → finalize the previous row, start a new one.
+      - Boundary (Total: footer / nominee header) → finalize current.
+      - Continuation candidate → append to the previous row's raw_merchant
+        if a row exists; drop otherwise (no anchor to attach to).
+
+    Ordinals are assigned 1..N in declaration order.
+    """
+    rows: list[ParsedRow] = []
+    current: ParsedRow | None = None
+
+    def finalize() -> None:
+        nonlocal current
+        if current is not None:
+            ordinal = len(rows) + 1
+            rows.append(
+                ParsedRow(
+                    txn_date=current.txn_date,
+                    amount=current.amount,
+                    direction=current.direction,
+                    raw_merchant=current.raw_merchant.strip(),
+                    source_row_ordinal=ordinal,
+                    txn_mode=current.txn_mode,
+                    is_upi_skip=current.is_upi_skip,
+                )
+            )
+            current = None
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+
+        if _NOMINEE_HEADER_RE.match(line):
+            finalize()
+            break
+
+        if _TOTAL_FOOTER_RE.match(line):
+            finalize()
+            continue
+
+        candidate = _extract_data_row(line)
+        if candidate is not None:
+            finalize()
+            current = candidate
+            continue
+
+        if current is not None and not _looks_like_header_or_chrome(line):
+            current = ParsedRow(
+                txn_date=current.txn_date,
+                amount=current.amount,
+                direction=current.direction,
+                raw_merchant=(current.raw_merchant + " " + line).strip(),
+                source_row_ordinal=current.source_row_ordinal,
+                txn_mode=current.txn_mode,
+                is_upi_skip=current.is_upi_skip
+                or classify_upi_skip(mode=current.txn_mode, particulars=line),
+            )
+
+    finalize()
+    return rows
+
+
 def _sha256_file(path: Path) -> str:
     """Hash the original (still-encrypted) PDF bytes. Re-decrypting with pikepdf
     produces a different byte stream, so we hash the input file directly to

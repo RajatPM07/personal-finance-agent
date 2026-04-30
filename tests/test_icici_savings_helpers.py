@@ -115,3 +115,61 @@ def test_extract_data_row_zero_amount_both_columns_returns_none():
     from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
     line = "28-02-2026 INT INT.PD-INFO 0.00 0.00 1,98,407.67"
     assert _extract_data_row(line) is None
+
+
+def test_assemble_rows_single_line_each():
+    """No continuation: each row is one line, ordinals are 1..N."""
+    from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
+    lines = [
+        "28-02-2026 NEFT NEFT-LOMBARD-PAYROLL 1,86,062.00 0.00 1,98,407.67",
+        "27-02-2026 ATM ATM-CASH WDL 0.00 5,000.00 1,93,407.67",
+    ]
+    rows = _assemble_rows(lines)
+    assert len(rows) == 2
+    assert rows[0].source_row_ordinal == 1
+    assert rows[1].source_row_ordinal == 2
+    assert rows[0].txn_mode == "NEFT"
+    assert rows[1].txn_mode == "ATM"
+
+
+def test_assemble_rows_continuation_appends_to_previous():
+    """Continuation line (no date) appends to the previous row's raw_merchant."""
+    from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
+    lines = [
+        "28-02-2026 NEFT NEFT-LOMBARD-PAYROLL 1,86,062.00 0.00 1,98,407.67",
+        "REFERENCE-NUMBER-EXTRA-INFO",
+        "27-02-2026 ATM ATM-CASH WDL 0.00 5,000.00 1,93,407.67",
+    ]
+    rows = _assemble_rows(lines)
+    assert len(rows) == 2
+    assert "REFERENCE-NUMBER-EXTRA-INFO" in rows[0].raw_merchant
+    assert rows[0].raw_merchant.startswith("NEFT-LOMBARD-PAYROLL")
+
+
+def test_assemble_rows_skips_header_total_blank():
+    """Non-data lines (header / Total / blank / unrelated nominee block)
+    don't disturb assembly."""
+    from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
+    lines = [
+        "DATE MODE PARTICULARS DEPOSITS WITHDRAWALS BALANCE",
+        "",
+        "28-02-2026 NEFT NEFT-LOMBARD 1,86,062.00 0.00 1,98,407.67",
+        "Total: 1,86,062.00 0.00 1,98,407.67",
+        "ACCOUNT TYPE ACCOUNT NUMBER MICR CODE IFS CODE NAME OF NOMINEE*",
+    ]
+    rows = _assemble_rows(lines)
+    assert len(rows) == 1
+    assert rows[0].source_row_ordinal == 1
+
+
+def test_assemble_rows_continuation_only_attaches_after_a_data_row():
+    """Stray continuation lines BEFORE any data row are dropped (no anchor
+    to attach to). Avoid silently losing real data without a row context."""
+    from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
+    lines = [
+        "stray text before any row",
+        "28-02-2026 NEFT NEFT-LOMBARD 1,86,062.00 0.00 1,98,407.67",
+    ]
+    rows = _assemble_rows(lines)
+    assert len(rows) == 1
+    assert "stray" not in rows[0].raw_merchant
