@@ -173,3 +173,62 @@ def test_assemble_rows_continuation_only_attaches_after_a_data_row():
     rows = _assemble_rows(lines)
     assert len(rows) == 1
     assert "stray" not in rows[0].raw_merchant
+
+
+def test_parse_total_row_basic():
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _parse_total_row
+    res = _parse_total_row("Total: 46,400.00 2,43,672.08 17,715.85")
+    assert res is not None
+    deposits, withdrawals, balance = res
+    assert deposits == Decimal("46400.00")
+    assert withdrawals == Decimal("243672.08")
+    assert balance == Decimal("17715.85")
+
+
+def test_parse_total_row_with_leading_whitespace():
+    from skills.finance.ingestion.parsers.icici_savings import _parse_total_row
+    res = _parse_total_row("    Total:  1,45,061.00  49,348.00  1,13,428.85")
+    assert res is not None
+
+
+def test_parse_total_row_non_total_returns_none():
+    from skills.finance.ingestion.parsers.icici_savings import _parse_total_row
+    assert _parse_total_row("28-02-2026 NEFT something 100.00 0.00 200.00") is None
+    assert _parse_total_row("DATE MODE PARTICULARS DEPOSITS WITHDRAWALS BALANCE") is None
+    assert _parse_total_row("") is None
+
+
+def test_aggregate_totals_sums_across_pages():
+    """Multiple Total: rows from different pages → summed."""
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _aggregate_totals
+    lines = [
+        "28-02-2026 NEFT NEFT-LOMBARD 1,86,062.00 0.00 1,98,407.67",
+        "Total: 1,86,062.00 0.00 1,98,407.67",
+        "27-02-2026 ATM ATM-CASH 0.00 5,000.00 1,93,407.67",
+        "Total: 0.00 5,000.00 1,93,407.67",
+    ]
+    totals = _aggregate_totals(lines)
+    assert totals["total_credits"] == Decimal("186062.00")
+    assert totals["total_spends"] == Decimal("5000.00")
+    assert totals["closing_balance"] == Decimal("193407.67")
+    assert totals["_derived_from_rows"] is False
+
+
+def test_aggregate_totals_no_total_rows_raises():
+    """Defensive: if NO Total: rows are found, fail loud rather than
+    silently using 0. ICICI savings statements always have explicit
+    subtotals; their absence indicates a layout change."""
+    import pytest
+
+    from skills.finance.ingestion.parsers.icici_savings import (
+        ParserError,
+        _aggregate_totals,
+    )
+    with pytest.raises(ParserError):
+        _aggregate_totals([
+            "28-02-2026 NEFT NEFT-LOMBARD 1,86,062.00 0.00 1,98,407.67",
+        ])

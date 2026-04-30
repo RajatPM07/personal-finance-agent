@@ -24,6 +24,7 @@ import hashlib
 import logging
 import re
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -224,6 +225,63 @@ def _assemble_rows(lines: list[str]) -> list[ParsedRow]:
 
     finalize()
     return rows
+
+
+# Per-page subtotal: "Total: <deposits> <withdrawals> <balance>"
+_TOTAL_ROW_RE = re.compile(
+    r"^\s*Total\s*:\s*"
+    r"(?P<deposits>[0-9,]+\.\d{2})\s+"
+    r"(?P<withdrawals>[0-9,]+\.\d{2})\s+"
+    r"(?P<balance>[0-9,]+\.\d{2})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_total_row(line: str) -> tuple[Decimal, Decimal, Decimal] | None:
+    """Parse 'Total: <deposits> <withdrawals> <balance>' line. Returns
+    (deposits, withdrawals, balance) or None if line doesn't match."""
+    m = _TOTAL_ROW_RE.match(line)
+    if not m:
+        return None
+    return (
+        _decimal_from_indian_str(m.group("deposits")),
+        _decimal_from_indian_str(m.group("withdrawals")),
+        _decimal_from_indian_str(m.group("balance")),
+    )
+
+
+def _aggregate_totals(lines: list[str]) -> dict[str, Any]:
+    """Scan all lines for per-page Total: rows; aggregate to statement totals.
+
+    Returns a dict matching the validator's expected shape:
+        {'total_spends', 'total_credits', 'closing_balance',
+         '_derived_from_rows': False}
+
+    Raises ParserError if no Total: row is found across ANY page (indicates
+    layout drift; ICICI savings statements always have explicit subtotals).
+    """
+    total_in = Decimal("0")
+    total_out = Decimal("0")
+    last_balance: Decimal | None = None
+    for line in lines:
+        parsed = _parse_total_row(line)
+        if parsed is None:
+            continue
+        deposits, withdrawals, balance = parsed
+        total_in += deposits
+        total_out += withdrawals
+        last_balance = balance
+    if last_balance is None:
+        raise ParserError(
+            "No 'Total:' subtotal rows found in any page. ICICI Savings layout "
+            "drift suspected; check the PDF text extraction for changes."
+        )
+    return {
+        "total_spends": total_out,
+        "total_credits": total_in,
+        "closing_balance": last_balance,
+        "_derived_from_rows": False,
+    }
 
 
 def _sha256_file(path: Path) -> str:
