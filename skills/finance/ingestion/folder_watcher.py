@@ -34,12 +34,14 @@ ACCOUNT_IDS: dict[str, UUID] = {
     "icici_cc": UUID("10000000-0000-0000-0000-000000000003"),
     "amex_cc": UUID("10000000-0000-0000-0000-000000000005"),
     "paytm_upi": UUID("10000000-0000-0000-0000-000000000006"),
+    "icici_savings": UUID("10000000-0000-0000-0000-000000000001"),
 }
 
 EXPECTED_EXTENSION: dict[str, str] = {
     "icici_cc": ".pdf",
     "amex_cc": ".xlsx",
     "paytm_upi": ".xlsx",
+    "icici_savings": ".pdf",
 }
 
 
@@ -61,6 +63,11 @@ async def dispatch_to_parser(
         from skills.finance.ingestion.parsers.paytm_upi import parse as paytm_parse
         parse_result = await asyncio.to_thread(paytm_parse, file_path)
         source = SourceMeta(source="manual_xlsx", source_ref=file_path.name)
+    elif bank == "icici_savings":
+        from skills.finance.ingestion.parsers.icici_savings import parse as savings_parse
+        savings_password = await asyncio.to_thread(password_lookup, "icici_savings", "1896")
+        parse_result = await asyncio.to_thread(savings_parse, file_path, savings_password)
+        source = SourceMeta(source="manual_pdf", source_ref=file_path.name)
     else:
         raise ValueError(f"Unknown bank: {bank}")
 
