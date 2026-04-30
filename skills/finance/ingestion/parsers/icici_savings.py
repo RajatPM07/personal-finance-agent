@@ -22,9 +22,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from skills.finance.ingestion._common import (
+    ParsedRow,
+    _decimal_from_indian_str,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,63 @@ def _parse_savings_date(s: Any) -> date:
         except ValueError:
             continue
     raise ParserError(f"Could not parse ICICI Savings date: {s!r}")
+
+
+# Anchor pattern: "DD-MM-YYYY MODE PARTICULARS_TEXT NUMBER NUMBER NUMBER"
+# - Date: 10 chars exactly
+# - MODE: short alphanumeric token (UPI, NEFT, IMPS, ATM, BIL/PAY, SAL, INT.PD, TFR, etc.)
+# - PARTICULARS: arbitrary text (lazy, terminated by the 3 trailing numerics)
+# - DEPOSITS / WITHDRAWALS / BALANCE: Indian-format numerics like "1,23,456.78"
+_ROW_RE = re.compile(
+    r"^(?P<date>\d{2}-\d{2}-\d{4})\s+"
+    r"(?P<mode>[A-Z][A-Z0-9./]*?)\s+"
+    r"(?P<particulars>.+?)\s+"
+    r"(?P<deposits>[0-9,]+\.\d{2})\s+"
+    r"(?P<withdrawals>[0-9,]+\.\d{2})\s+"
+    r"(?P<balance>[0-9,]+\.\d{2})$"
+)
+
+
+def _extract_data_row(line: str) -> ParsedRow | None:
+    """Parse a single transaction line. Returns None if the line isn't a
+    transaction row (header, page footer 'Total:', continuation line, blank,
+    or both monetary columns are zero).
+
+    Caller is responsible for assembling continuation lines onto the previous
+    row's `raw_merchant` (Task 6) and for assigning the real ordinal.
+    """
+    if not line:
+        return None
+    m = _ROW_RE.match(line.strip())
+    if not m:
+        return None
+    deposits = _decimal_from_indian_str(m.group("deposits"))
+    withdrawals = _decimal_from_indian_str(m.group("withdrawals"))
+    if deposits == 0 and withdrawals == 0:
+        return None
+    if deposits > 0 and withdrawals > 0:
+        raise ParserError(
+            f"Row has both deposits and withdrawals non-zero: {line!r}. "
+            f"Layout drift likely; check ROW_RE column alignment."
+        )
+    direction: Literal["in", "out"]
+    if deposits > 0:
+        direction = "in"
+        amount = deposits
+    else:
+        direction = "out"
+        amount = withdrawals
+    mode = m.group("mode")
+    particulars = m.group("particulars").strip()
+    return ParsedRow(
+        txn_date=_parse_savings_date(m.group("date")),
+        amount=amount,
+        direction=direction,
+        raw_merchant=particulars,
+        source_row_ordinal=0,
+        txn_mode=mode,
+        is_upi_skip=classify_upi_skip(mode=mode, particulars=particulars),
+    )
 
 
 def _sha256_file(path: Path) -> str:

@@ -63,3 +63,55 @@ def test_parse_savings_date_unparseable_raises():
     )
     with pytest.raises(ParserError):
         _parse_savings_date("not a date")
+
+
+def test_extract_data_row_full_columns():
+    """A complete data line: DATE MODE PARTICULARS DEPOSITS WITHDRAWALS BALANCE.
+    All columns extracted; one of DEPOSITS/WITHDRAWALS is non-zero."""
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "28-02-2026 NEFT NEFT-LOMBARD-PAYROLL FEB 2026 1,86,062.00 0.00 1,98,407.67"
+    row = _extract_data_row(line)
+    assert row is not None
+    assert row.txn_date.isoformat() == "2026-02-28"
+    assert row.direction == "in"
+    assert str(row.amount) == "186062.00"
+    assert row.txn_mode == "NEFT"
+    assert "LOMBARD-PAYROLL" in row.raw_merchant
+
+
+def test_extract_data_row_withdrawal():
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "27-02-2026 ATM ATM-CASH WDL/ATMID/12345 0.00 5,000.00 1,93,407.67"
+    row = _extract_data_row(line)
+    assert row is not None
+    assert row.direction == "out"
+    assert str(row.amount) == "5000.00"
+    assert row.txn_mode == "ATM"
+
+
+def test_extract_data_row_upi_flagged_skip():
+    """UPI row gets is_upi_skip=True and txn_mode='UPI'."""
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "26-02-2026 UPI UPI/SOMEONE/UPI-REF-12345/SBI 0.00 500.00 1,98,407.67"
+    row = _extract_data_row(line)
+    assert row is not None
+    assert row.is_upi_skip is True
+    assert row.txn_mode == "UPI"
+
+
+def test_extract_data_row_no_date_returns_none():
+    """Lines that don't start with a date (continuation lines, headers,
+    page footers) → None. Caller treats those separately."""
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    assert _extract_data_row("DATE MODE PARTICULARS DEPOSITS WITHDRAWALS BALANCE") is None
+    assert _extract_data_row("Total: 46,400.00 2,43,672.08 17,715.85") is None
+    assert _extract_data_row("continuation of description") is None
+    assert _extract_data_row("") is None
+
+
+def test_extract_data_row_zero_amount_both_columns_returns_none():
+    """Defensive: if both deposits and withdrawals are 0, the row has no
+    monetary content — skip (parallel to ICICI CC's `amt <= 0` filter)."""
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "28-02-2026 INT INT.PD-INFO 0.00 0.00 1,98,407.67"
+    assert _extract_data_row(line) is None
