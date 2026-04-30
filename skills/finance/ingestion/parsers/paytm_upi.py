@@ -31,7 +31,11 @@ from typing import Any, cast
 
 import pandas as pd
 
-from skills.finance.ingestion._common import ParsedRow, ParseResult
+from skills.finance.ingestion._common import (
+    ParsedRow,
+    ParseResult,
+    _decimal_from_indian_str,
+)
 from skills.finance.lib.db import service_client
 
 logger = logging.getLogger(__name__)
@@ -80,15 +84,7 @@ def classify_self_transfer(
 
 
 # Summary-sheet parsing ------------------------------------------------------
-
-def _decimal_from_indian_str(s: Any) -> Decimal:
-    """Convert '1,23,456.78' or 1234.56 or Decimal(...) → Decimal('1234.56').
-    Tolerates Indian-style multi-comma thousand/lakh separators."""
-    if isinstance(s, Decimal):
-        return s
-    cleaned = str(s).replace(",", "").strip()
-    return Decimal(cleaned)
-
+# (_decimal_from_indian_str moved to _common.py in W3.4 — see import above.)
 
 _SUMMARY_LABELS = {
     "paid_amount": "Money Paid (Amount in Rs.)",

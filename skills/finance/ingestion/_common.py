@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 
@@ -19,7 +19,7 @@ import yaml
 # V2 onboarding will move this to settings.py when Ayushi is added.
 RAJAT_USER_ID: str = "00000000-0000-0000-0000-000000000001"
 
-Bank = Literal["icici_cc", "amex_cc", "paytm_upi"]
+Bank = Literal["icici_cc", "amex_cc", "paytm_upi", "icici_savings"]
 
 
 class AmbiguousCredentialError(Exception):
@@ -42,6 +42,9 @@ class ParsedRow:
     is_amex_routed: bool = False           # True → row is dropped at insert (D1 dual-entry skip)
     is_self_transfer: bool = False         # True → Paytm 'Money sent to ...' row to a known own-handle (D2)
     category_hint: str | None = None       # Paytm's pre-tagged category, emoji-stripped (D4)
+    # ICICI Savings fields (W3.4). Other parsers leave these at defaults.
+    is_upi_skip: bool = False              # True → row is dropped at insert (D1: Paytm = UPI source-of-truth)
+    txn_mode: str | None = None            # UPI / NEFT / IMPS / ATM / BIL/PAY / SAL / INT.PD / TFR / etc.; NULL for non-savings parsers.
 
 
 @dataclass(frozen=True)
@@ -58,11 +61,12 @@ class ParseResult:
     parser_version: str                    # e.g. "icici-cc/v1"
 
     def insertable_rows(self) -> list[ParsedRow]:
-        """Rows the pipeline should persist. Excludes is_amex_routed=True rows
-        (D1: same spend already captured via the AMEX statement). Self-transfers
-        ARE in the insertable set (D2: ingest all transactions even when
-        excluded from the published-summary count)."""
-        return [r for r in self.rows if not r.is_amex_routed]
+        """Rows the pipeline should persist. Excludes:
+          - is_amex_routed=True rows (W3.1 D1: same spend already captured via the AMEX statement)
+          - is_upi_skip=True rows (W3.4 D1: Paytm passbook is V1 source-of-truth for UPI)
+        Self-transfers (Paytm) ARE in the insertable set (W3.1 D2: ingest all
+        transactions even when excluded from the published-summary count)."""
+        return [r for r in self.rows if not r.is_amex_routed and not r.is_upi_skip]
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,19 @@ class ValidationResult:
     declared_out: Decimal
     extracted_in: Decimal
     extracted_out: Decimal
+
+
+def _decimal_from_indian_str(s: Any) -> Decimal:
+    """Convert '1,23,456.78' or 1234.56 or Decimal(...) → Decimal('1234.56').
+    Tolerates Indian-style multi-comma thousand/lakh separators and signed
+    strings like '-1,234.56' or '+5,000.00'.
+
+    Promoted from parsers/paytm_upi.py to _common in W3.4 to share with the
+    ICICI Savings parser; behavior unchanged."""
+    if isinstance(s, Decimal):
+        return s
+    cleaned = str(s).replace(",", "").strip()
+    return Decimal(cleaned)
 
 
 def detect_bank_from_filename(filename: str) -> Bank | None:
