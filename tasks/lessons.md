@@ -5,6 +5,20 @@ Format: date → pattern → root cause → rule.
 
 ---
 
+## 2026-05-01 — Plan regex died on real fixture; verified with two spikes before committing
+
+**Pattern:** W3.4 ICICI Savings plan locked a `_ROW_RE` that assumed every transaction line carried `DATE MODE PARTICULARS DEPOSITS WITHDRAWALS BALANCE` (3 trailing numerics). On the real Feb 2026 PDF: 0 rows extracted. pdfplumber rendered ICICI's empty deposit/withdrawal cell as blank, so most rows had only 2 numerics, and PARTICULARS wrapped both above (with the MODE token) and below the date baseline.
+
+**Root cause:** Spec was written from inspecting the visible PDF in a reader, not from `pdfplumber.extract_text()` output. The actual extracted layout is always different from what a human sees rendered.
+
+**Rule:**
+1. Before locking ANY parser regex/state-machine in a plan, run `pdfplumber.extract_text()` (or equivalent) on a real fixture and inspect the literal line layout. Add the dump to `tasks/preconditions-notes.md`.
+2. When a plan's regex doesn't match a real fixture, STOP and re-plan. Don't tweak the regex incrementally — the layout assumption itself is wrong.
+3. Spike alternatives end-to-end with explicit accuracy numbers (rows extracted, declared vs extracted totals, deltas) before committing to a path. Two spikes (Option A vs B) saved a day of wrong-path work — text-extract + state machine hit zero-delta on both fixtures first try; `extract_tables(text strategy)` had per-page column drift and lost the Total: rows entirely.
+4. For ICICI Savings layouts specifically: trailing-numeric count varies (1=B/F, 2=typical, 3=both-non-zero); direction must be inferred from balance arithmetic; MODE is on the head continuation OR inline first token; between two date rows the LAST continuation belongs to the next txn.
+
+---
+
 ## 2026-04-21 — r2 plan review caught four bugs after sign-off
 
 **Pattern:** Week 1 plan r2 was "signed off" but a focused second pass found four bugs that would have bitten during execution: (a) heartbeat middleware missing `.execute()` terminator, (b) readonly role password committed to git, (c) seed PII committed to git, (d) `python-dotenv` missing from deps despite backup script using it.

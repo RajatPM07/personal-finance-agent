@@ -132,8 +132,13 @@ def test_assemble_rows_single_line_each():
     assert rows[1].txn_mode == "ATM"
 
 
-def test_assemble_rows_continuation_appends_to_previous():
-    """Continuation line (no date) appends to the previous row's raw_merchant."""
+def test_assemble_rows_single_continuation_attaches_as_head_of_next():
+    """The line above a date row is the HEAD of that date row's txn (it's a
+    PARTICULARS wrap from the visible PDF row above). Between two date rows,
+    the LAST continuation line is the head of the NEXT txn — not the tail of
+    the previous. Validated against real fixtures: ICICI Savings PDFs render
+    each txn as a 1-3 line block with the wrapped PARTICULARS prefix on the
+    line above the date baseline."""
     from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
     lines = [
         "28-02-2026 NEFT NEFT-LOMBARD-PAYROLL 1,86,062.00 0.00 1,98,407.67",
@@ -142,8 +147,110 @@ def test_assemble_rows_continuation_appends_to_previous():
     ]
     rows = _assemble_rows(lines)
     assert len(rows) == 2
-    assert "REFERENCE-NUMBER-EXTRA-INFO" in rows[0].raw_merchant
-    assert rows[0].raw_merchant.startswith("NEFT-LOMBARD-PAYROLL")
+    # head-of-next: continuation prepends to the SECOND txn's raw_merchant
+    assert rows[1].raw_merchant.startswith("REFERENCE-NUMBER-EXTRA-INFO")
+    assert "ATM ATM-CASH WDL" in rows[1].raw_merchant
+    # first txn unchanged (no tail attached when only one continuation existed)
+    assert "REFERENCE-NUMBER-EXTRA-INFO" not in rows[0].raw_merchant
+
+
+def test_assemble_rows_split_tail_then_head_between_two_dates():
+    """When TWO continuation lines appear between two date rows, the LAST
+    one is the head of the next txn and the EARLIER one is the tail of the
+    previous txn. Mirrors the actual ICICI layout where each txn is a
+    [optional head] [date row] [optional tail] block — between two
+    consecutive dates, the boundary lands at the last line."""
+    from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
+    lines = [
+        "28-02-2026 NEFT NEFT-LOMBARD-PAYROLL 1,86,062.00 0.00 1,98,407.67",
+        "TAIL-OF-FIRST-TXN",
+        "HEAD-OF-SECOND-TXN",
+        "27-02-2026 ATM ATM-CASH WDL 0.00 5,000.00 1,93,407.67",
+    ]
+    rows = _assemble_rows(lines)
+    assert len(rows) == 2
+    assert "TAIL-OF-FIRST-TXN" in rows[0].raw_merchant
+    assert "HEAD-OF-SECOND-TXN" not in rows[0].raw_merchant
+    assert rows[1].raw_merchant.startswith("HEAD-OF-SECOND-TXN")
+    assert "TAIL-OF-FIRST-TXN" not in rows[1].raw_merchant
+
+
+def test_assemble_rows_trailing_continuation_attaches_to_last_row():
+    """Continuations after the LAST date row — with no further date to anchor
+    them as 'head of next' — flush onto the last emitted row's raw_merchant."""
+    from skills.finance.ingestion.parsers.icici_savings import _assemble_rows
+    lines = [
+        "28-02-2026 NEFT NEFT-LOMBARD-PAYROLL 1,86,062.00 0.00 1,98,407.67",
+        "TAIL-AFTER-LAST",
+    ]
+    rows = _assemble_rows(lines)
+    assert len(rows) == 1
+    assert "TAIL-AFTER-LAST" in rows[0].raw_merchant
+
+
+def test_extract_data_row_two_numerics_balance_increase_is_deposit():
+    """When the date line has only 2 trailing numerics (typical real-PDF
+    case where ICICI's empty deposit/withdrawal column collapses), direction
+    is inferred from balance delta: balance went up → 'in'."""
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "01-02-2026 BANK/117989491265/HDFccb8d2a7f2d54e61a835bef99bd8 23,200.00 2,38,187.93"
+    row = _extract_data_row(line, prev_balance=Decimal("214987.93"))
+    assert row is not None
+    assert row.direction == "in"
+    assert row.amount == Decimal("23200.00")
+    assert str(row.txn_date) == "2026-02-01"
+
+
+def test_extract_data_row_two_numerics_balance_decrease_is_withdrawal():
+    """Balance went down → 'out'."""
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "01-02-2026 C/StandardC/639803364697 90,000.00 1,48,187.93"
+    row = _extract_data_row(line, prev_balance=Decimal("238187.93"))
+    assert row is not None
+    assert row.direction == "out"
+    assert row.amount == Decimal("90000.00")
+
+
+def test_extract_data_row_two_numerics_no_prev_balance_defaults_to_out():
+    """First-of-statement edge case: no prev_balance available → default to
+    'out' (safer to under-count credits than over-count). State machine
+    almost always seeds prev_balance from the B/F row before the first txn."""
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "01-02-2026 BIL/Personal Loan EMI 21,818.00 28,114.85"
+    row = _extract_data_row(line, prev_balance=None)
+    assert row is not None
+    assert row.direction == "out"
+    assert row.amount == Decimal("21818.00")
+
+
+def test_extract_data_row_one_numeric_returns_none():
+    """B/F (or C/F) row has only the carry-forward balance and no monetary
+    transaction. Returns None; the state machine still uses the balance for
+    prev_balance carry-forward."""
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    assert _extract_data_row("01-02-2026 B/F 2,14,987.93") is None
+
+
+def test_extract_data_row_with_head_continuation_seeds_upi_mode():
+    """When the head continuation starts with 'UPI/...' the row gets MODE='UPI'
+    and is_upi_skip=True even if the date line itself has no MODE token
+    (typical real-PDF layout)."""
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = "01-02-2026 BANK/117989491265/HDFccb 23,200.00 2,38,187.93"
+    head = "UPI/ANSHUL KUM/thisisanshul09/UPI/HDFC"
+    row = _extract_data_row(line, prev_balance=Decimal("214987.93"), head_continuation=head)
+    assert row is not None
+    assert row.txn_mode == "UPI"
+    assert row.is_upi_skip is True
+    assert row.raw_merchant.startswith("UPI/ANSHUL KUM")
 
 
 def test_assemble_rows_skips_header_total_blank():
