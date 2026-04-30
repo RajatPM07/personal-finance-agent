@@ -1,6 +1,25 @@
 def test_savings_parser_version():
     from skills.finance.ingestion.parsers.icici_savings import __parser_version__
-    assert __parser_version__ == "icici-savings-pdf/v1"
+    assert __parser_version__ == "icici-savings-pdf/v2"
+
+
+def test_extract_data_row_quarterly_interest_credit_picks_int_pd():
+    """Real-fixture quirk (Mar 2026 quarterly interest entry): the date line's
+    first inline token is a reference-prefixed colon string of the form
+    `<ref>:Int.Pd:<from>-<to>`. _detect_mode must extract `INT.PD` from
+    the middle segment instead of leaking the whole token as the mode.
+    Regression test for the v1→v2 bump."""
+    from decimal import Decimal
+
+    from skills.finance.ingestion.parsers.icici_savings import _extract_data_row
+    line = (
+        "30-03-2026 772201501896:Int.Pd:31-12-2025 to 29-03-2026 184.00 203780.85"
+    )
+    row = _extract_data_row(line, prev_balance=Decimal("203596.85"))
+    assert row is not None
+    assert row.txn_mode == "INT.PD"
+    assert row.direction == "in"
+    assert row.amount == Decimal("184.00")
 
 
 def test_classify_upi_skip_true_for_mode_upi():

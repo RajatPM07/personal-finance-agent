@@ -17,14 +17,14 @@ def _password() -> str:
 
 def test_savings_parser_version_via_parse_entrypoint():
     from skills.finance.ingestion.parsers.icici_savings import __parser_version__
-    assert __parser_version__ == "icici-savings-pdf/v1"
+    assert __parser_version__ == "icici-savings-pdf/v2"
 
 
 @pytest.mark.skipif(not FIXTURE_FEB.exists(), reason="ICICI Savings Feb fixture missing")
 def test_parse_feb_returns_nonempty_parseresult():
     from skills.finance.ingestion.parsers.icici_savings import parse
     result = parse(FIXTURE_FEB, _password())
-    assert result.parser_version == "icici-savings-pdf/v1"
+    assert result.parser_version == "icici-savings-pdf/v2"
     assert len(result.pdf_content_hash) == 64
     assert len(result.rows) > 30
     assert "total_spends" in result.declared_totals

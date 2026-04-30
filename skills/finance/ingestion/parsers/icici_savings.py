@@ -41,7 +41,7 @@ from skills.finance.ingestion._common import (
 
 logger = logging.getLogger(__name__)
 
-__parser_version__ = "icici-savings-pdf/v1"
+__parser_version__ = "icici-savings-pdf/v2"
 
 
 class ParserError(Exception):
@@ -113,7 +113,14 @@ _INLINE_MODE_TOKENS = {
 
 def _detect_mode(head_continuation: str, inline_first_token: str) -> str:
     """Resolve the MODE for a transaction. Head wins (typical UPI case);
-    falls back to the first inline token of the date row."""
+    falls back to the first inline token of the date row.
+
+    Special case (added in v2): quarterly interest credits use a reference-
+    prefixed colon layout — `<numeric-ref>:Int.Pd:<from>-<to>` — where the
+    MODE token is wedged between colons. We scan the colon-split segments
+    for a known mode name before falling through to the base extraction,
+    so this row is labeled `INT.PD` instead of the leaked reference number.
+    """
     if head_continuation:
         for p in _MODE_HEAD_PREFIXES:
             if head_continuation.startswith(p):
@@ -121,6 +128,12 @@ def _detect_mode(head_continuation: str, inline_first_token: str) -> str:
     t = (inline_first_token or "").strip()
     if not t:
         return ""
+    if ":" in t:
+        known = {x.upper() for x in _INLINE_MODE_TOKENS}
+        for seg in t.split(":"):
+            s = seg.strip().rstrip(".").upper()
+            if s in known:
+                return s
     # Preserve B/F and C/F literally
     if t.startswith("B/F"):
         return "B/F"
