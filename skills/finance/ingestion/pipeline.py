@@ -60,6 +60,7 @@ def _build_insert_row(
         "parser_version": pr.parser_version,
         "import_hash": h,
         "category_hint": r.category_hint,    # W3.1: Paytm-only today; NULL for ICICI/AMEX
+        "txn_mode": r.txn_mode,              # W3.4: ICICI Savings-only; NULL for ICICI CC/AMEX/Paytm
     }
 
 
