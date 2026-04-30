@@ -106,6 +106,25 @@ Format: date → pattern → root cause → rule.
 
 **Captured as:** This entry. AntiGravity venv was recreated 2026-04-26 (commit 302ed16 added the missing `[tool.setuptools] packages = ["skills"]` declaration the rebuild required).
 
+## 2026-04-30 — Routing decision accepts a documented quality-vs-cost trade rather than silently shipping the cheapest option
+
+**Pattern:** PRD §6.4 explicitly chose Anthropic Sonnet as primary for `stakes:high` reasoning tasks (sql_agent, affordability_reasoning). The Anthropic balance is bounded at ~$5 with a hard zero-new-spend constraint from the user. The naive moves are either (a) silently flip the yaml to free-tier primary and pretend the PRD didn't say what it said, or (b) leave the yaml as-is and let calls fail loudly when they fire (eventually).
+
+**Root cause:** Both naive moves lose information. (a) erases the prior decision and its rationale; future review can't tell whether the change was deliberate or accidental drift. (b) lets a known-broken state ship into production.
+
+**Rule:** When a previously-documented PRD-level decision is going to be deviated from for a real-world reason (cost, capacity, deprecated tool), produce a **deviation spec** that:
+1. Names the original decision and its rationale.
+2. States the new constraint forcing the deviation.
+3. Specifies the new behavior including any compensating controls (here: the SQL-agent reviewer layer + calibration harness).
+4. Documents the deviation as deliberate and bounded — including explicit revisit triggers so it can't silently rot.
+5. Updates the affected config file's comments to point at the deviation spec, so a future reader of the config sees the trail.
+
+**Why this matters:** A deviation spec costs ~30 minutes to write. It saves multiple hours later when "wait, why isn't sql_agent using Sonnet anymore?" comes up — and prevents the worse outcome where someone restores the original yaml line, breaking the new behavior because the compensating controls weren't loaded into their head.
+
+**Captured as:** `docs/superpowers/specs/2026-04-30-llm-routing-anthropic-zero-spend.md` (the deviation spec); `config/model_routing.yaml` comment block referencing it; supersession line in `docs/superpowers/specs/2026-04-26-v1-roadmap-r2-reprioritization.md` updating its W3.3 entry.
+
+---
+
 ## 2026-04-26 — supabase-py insert types narrow `dict[str, T]` to `dict[str, object]` and mypy rejects
 
 **Pattern:** Building a heterogeneous-value dict literal (mixed str/int/None values) and passing it to `service_client().table(...).insert(d)` fails mypy with `Argument 1 ... has incompatible type "dict[str, object]"; expected "JSON"`. mypy infers the dict as `dict[str, object]` because of the value-type variance; supabase-py's stub wants a more specific JSON type.

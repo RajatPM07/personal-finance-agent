@@ -16,6 +16,42 @@
 # - pdf_extraction's fallback STAYS on Claude Sonnet because it's the only
 #   vision-capable option in this stack besides Gemini. Substituting Groq Llama
 #   would be silently wrong — Llama 3.3 70B is text-only.
+#
+# ───────────────────────────────────────────────────────────────────────────
+# 2026-04-30 SCHEDULED CHANGE — to land with W4.1 (SQL agent) implementation:
+# ───────────────────────────────────────────────────────────────────────────
+# Per docs/superpowers/specs/2026-04-30-llm-routing-anthropic-zero-spend.md
+# (locked v2), under a hard zero-Anthropic-spend constraint, the following
+# routing changes will land when the W4.1 SQL agent ships:
+#
+#   sql_agent:
+#     primary: anthropic/claude-sonnet-4-6  →  groq/llama-3.3-70b-versatile
+#     fallbacks: [groq/...]                 →  [anthropic/claude-sonnet-4-6]
+#
+#   affordability_reasoning:
+#     same flip as sql_agent.
+#
+# Plus three new task entries (also added with W4.1):
+#   - sql_agent_judge          (Gemini Flash, primary judge in reviewer layer)
+#   - sql_agent_judge_strict   (Anthropic Sonnet, escalation judge)
+#   - sql_agent_strict         (Anthropic Sonnet, last-resort SQL gen)
+#
+# And one new task entry that lands with W3.4 (Payslip parser):
+#   - payslip_extraction       (Gemini Flash, vision + structured output)
+#
+# Rationale for keeping the current entries unchanged until W4.1:
+#   1. sql_agent + affordability_reasoning are not invoked anywhere in the
+#      shipped code today (no caller exists pre-W4.1), so flipping the yaml
+#      now would be a no-op until W4.1 wires it up.
+#   2. The reviewer layer (§4 of the linked spec) is what makes the flip
+#      defensible — flipping the yaml without the reviewer would silently
+#      degrade quality. Land them together.
+#   3. W3.4 (Payslip) ships before W4.1 and adds payslip_extraction at that
+#      point — also defers the rest of the flip to W4.1 by design.
+#
+# Treat this comment block as the authoritative scheduled-change record
+# until W4.1 commits the actual yaml diff.
+# ───────────────────────────────────────────────────────────────────────────
 
 pdf_extraction:
   model: gemini/gemini-2.5-flash
