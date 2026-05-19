@@ -27,8 +27,19 @@ def _load_routing() -> dict:
 ROUTING = _load_routing()
 
 
-def llm(task: str, prompt: str, system: str | None = None):
-    """Single entry point for all LLM calls. Routes by task name via model_routing.yaml."""
+def llm(
+    task: str,
+    prompt: str,
+    system: str | None = None,
+    response_format: dict | None = None,
+):
+    """Single entry point for all LLM calls. Routes by task name via model_routing.yaml.
+
+    `response_format`: optional structured-output spec passed through to LiteLLM.
+    Used by W4.1's reviewer-layer judges to request JSON output. Provider support
+    varies (Gemini honors via response_mime_type; Anthropic via tools; Groq via
+    prompt-only). LiteLLM normalises across providers.
+    """
     if task not in ROUTING:
         raise KeyError(f"Unknown task '{task}'. Known: {list(ROUTING.keys())}")
     cfg = ROUTING[task]
@@ -36,9 +47,14 @@ def llm(task: str, prompt: str, system: str | None = None):
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    return litellm.completion(
-        model=cfg["model"],
-        messages=messages,
-        fallbacks=cfg.get("fallbacks", []),
-        metadata={"task": task},
-    )
+
+    kwargs = {
+        "model": cfg["model"],
+        "messages": messages,
+        "fallbacks": cfg.get("fallbacks", []),
+        "metadata": {"task": task},
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    return litellm.completion(**kwargs)
+
