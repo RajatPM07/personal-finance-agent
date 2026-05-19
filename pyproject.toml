@@ -14,6 +14,7 @@ dependencies = [
     "rapidfuzz>=3",
     "supabase>=2.5,<3",
     "psycopg[binary]>=3.3,<4",  # W3.5 readonly client (psycopg3, Supavisor pooler — `-c options` doesn't survive pooler; SET post-connect, see lib/db.py)
+    "sqlglot>=22,<27",  # W4.1 SQL static validator — parse postgres dialect, classify statement type, enforce table allowlist
     # `bout` intentionally removed — preconditions notes §0.1 found it does NOT parse PDFs
     # (it's a CSV→QIF converter). Week 1 uses pikepdf + pdfplumber directly for the ICICI
     # smoke. A real row-level parser lands in Week 2 and will be added to deps then.
