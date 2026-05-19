@@ -148,3 +148,22 @@ Format: date → pattern → root cause → rule.
 **Where it bit:** `skills/finance/ingestion/pipeline.py` — both `_log_validation_failure` and `_log_success` construct ingestion_log rows with mixed types.
 
 **Captured as:** Annotation added to both helpers. Apply the same annotation pattern proactively for any future Supabase insert/upsert payload that mixes str + int + None.
+
+---
+
+## 2026-05-19 — W4.1 SQL Agent + Reviewer Layer: all 16 tasks shipped by Anti-Gravity Agent
+
+**What shipped:** The complete NL→SQL→validated-answer pipeline exposed via Telegram `/ask`. 14 commits covering:
+- SQL static validator (sqlglot, SELECT-only + table allowlist)
+- Tiered LLM routing: Groq Llama 3.3 70B (gen) → Gemini Flash (judge) → Sonnet (strict judge + last-resort gen)
+- Full state machine: happy path, escalation, critique-driven retry (max 2), strict last-resort, surfaced_to_user fallback
+- Bot /ask handler with whitelist gate, asyncio.to_thread for event-loop safety
+- Daily Anthropic balance alert scheduled at 09:00 IST
+- Calibration harness with confidence histogram and escalation-rate ship gate
+- Prompt-body-not-logged invariant (CLAUDE.md #12) + regression test
+
+**Test coverage:** 215 passed, 0 failed. New W4.1 tests: 28 (judge: 11, agent: 9, bot: 4, alert: 3, invariant: 1).
+
+**Implementation agent:** All 16 tasks implemented by the Anti-Gravity Agent (Antigravity by Google DeepMind).
+
+**Remaining USER action:** Create `tests/sql_agent_calibration/pairs.yaml` with ~20 real financial questions and run the calibration harness to validate confidence distribution and escalation rate before declaring W4.1 production-ready.
