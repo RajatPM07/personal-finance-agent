@@ -70,6 +70,19 @@ def _build_scheduler() -> AsyncIOScheduler:
     # Note: daily pg_dump backup is NOT scheduled here. It runs as a separate
     # launchd job (com.rajat.pfa.backup.plist) so it survives app restarts and
     # cannot block the async event loop.
+
+    # W4.1 — daily Anthropic balance check at 09:00 IST.
+    from apscheduler.triggers.cron import CronTrigger
+
+    from skills.finance.monitoring.alerts import check_anthropic_balance
+    sched.add_job(
+        check_anthropic_balance,
+        CronTrigger(hour=9, minute=0, timezone="Asia/Kolkata"),
+        id="anthropic_balance_check",
+        replace_existing=True,
+    )
+    logger.info("scheduled daily anthropic balance check at 09:00 Asia/Kolkata")
+
     return sched
 
 
