@@ -1,0 +1,44 @@
+# Example pairs file demonstrating the schema. Real pairs live in
+# pairs.yaml (gitignored). Copy this file, edit, run run_calibration.py.
+#
+# Categories to cover (per spec §5.3):
+#   - Simple aggregates × 4
+#   - Time-window comparisons × 3
+#   - Top-N / ranking × 3
+#   - Multi-table joins × 3
+#   - Date math edge cases × 2
+#   - Aggregation variations × 2
+#   - Genuinely unanswerable × 1
+#   - Negative / edge cases × 2
+# Total: 20 pairs.
+
+- id: 1
+  category: simple_aggregate
+  question: "How many transactions are in the database total?"
+  expected_sql: |
+    SELECT count(*) FROM transactions
+  expected_value: null   # fill in after manual run
+  notes: "Trivial sanity check — should always pass the judge."
+
+- id: 2
+  category: top_n
+  question: "Top 5 merchants by total spend in March 2026."
+  expected_sql: |
+    SELECT raw_merchant, sum(amount) AS total
+    FROM transactions
+    WHERE direction = 'out'
+      AND date >= '2026-03-01' AND date < '2026-04-01'
+    GROUP BY raw_merchant
+    ORDER BY total DESC
+    LIMIT 5
+  expected_value: null
+  notes: ""
+
+- id: 3
+  category: unanswerable
+  question: "Am I spending more than usual lately?"
+  expected_sql: null
+  expected_value: null
+  notes: |
+    Genuinely ambiguous — "usual" is undefined without a baseline period
+    spec. Expected judge verdict: uncertain. Validates the rephrase path.
