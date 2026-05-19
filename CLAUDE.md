@@ -42,6 +42,7 @@ See `PRD.md` for scope; `tasks/todo.md` for current plan; `tasks/lessons.md` for
 9. **Secrets split:** `.env` for flat env vars; `credentials.yaml` *only* for keyed PDF passwords.
 10. **Parser golden fixtures contain real PII** — `tests/golden_fixtures/*.pdf` is gitignored. Tests skip when missing; never commit real statements.
 11. **Never pin a library version, model ID, or library API surface from memory or from a summary document.** Run `help()`, `pip index versions`, or a one-line smoke call and write the output to `tasks/preconditions-notes.md`. Trust verified output, not recollection. (Lesson cost: `bout` was cited as a PDF parser when it's CSV-only; `claude-sonnet-4-7` was cited when current Sonnet is 4.6. Both would have shipped without Task 0 verification.)
+12. **Judge-prompt content (schema_excerpt + result_preview) carries `credentials.yaml`-level sensitivity.** LiteLLM's `success_callback` in `lib/llm.py` logs metadata only — never extend it to capture `messages=` or rendered prompts without an explicit privacy review. Real schema names + the first 3 result rows = real PII. Regression-tested by `tests/test_llm_logging_invariant.py`. Per spec §4.5.
 
 ## Blocked patterns
 
