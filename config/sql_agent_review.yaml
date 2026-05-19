@@ -1,0 +1,18 @@
+# W4.1 SQL-agent reviewer layer tunables.
+# Per docs/superpowers/specs/2026-04-30-llm-routing-anthropic-zero-spend.md §4.4.
+# These live in yaml (not code) so threshold tuning during calibration does NOT
+# require a commit; rerun calibration after editing.
+
+# Gate on `verdict == "ok"`. When confidence < this, treat as "uncertain"
+# and escalate to the strict judge. Spec §5.0 distribution plot MAY force
+# a different value — if Gemini's confidence clusters narrowly, drop to 0.0.
+confidence_threshold: 0.85
+
+# Maximum retry rounds when the judge returns verdict=wrong. Beyond this,
+# the question itself is the problem — surface "rephrase?" to the user.
+max_retry_rounds: 2
+
+# Telegram alert fires when Anthropic balance drops below this USD figure.
+# At expected burn (~$0.001/query), the $5 starting credit lasts 1–2 years;
+# $3 trigger gives months of lead time before the routing flip becomes urgent.
+anthropic_balance_warning_usd: 3.0
