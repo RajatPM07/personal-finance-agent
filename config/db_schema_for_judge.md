@@ -72,4 +72,4 @@ This excerpt is the judge's view of the world — keep it accurate but minimal.
 - **`amount` is unsigned**; use `direction = 'out'` for spend, `direction = 'in'` for income.
 - **Soft deletes:** unless the question explicitly asks for "deleted" rows, filter by `is_deleted = false` or omit the filter (default behavior depends on the question intent — flag with `verdict=uncertain` if ambiguous).
 - **Asia/Kolkata timezone:** `date` is calendar-date in Asia/Kolkata. `txn_time` is timestamptz; cast to date in Asia/Kolkata before grouping if mixing.
-- **The single user is Rajat**; `user_id` filtering is a no-op in V1 (single-user), but well-written SQL still includes the filter.
+- **Single-user V1 — DO NOT include a `user_id` filter in your WHERE clauses.** The database has exactly one user and you do not have access to the actual `user_id` UUID. Adding `WHERE user_id = '...'` will produce hallucinated UUIDs and execution errors. Omit it entirely.
