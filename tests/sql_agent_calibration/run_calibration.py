@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -78,7 +79,7 @@ def _bucket_confidence(values: list[float]) -> str:
     return "\n".join(out_lines)
 
 
-def main() -> int:
+def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--pairs",
@@ -89,7 +90,22 @@ def main() -> int:
         "--out",
         default=f"tests/sql_agent_calibration/results-{datetime.now(UTC):%Y%m%dT%H%M%S}.json",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--pair-delay-seconds",
+        type=float,
+        default=3.0,
+        help=(
+            "Sleep between pairs to stay under Groq free-tier RPM (~30/min). "
+            "At ~7 LLM calls per pair the runner burns ~140 calls per 20-pair "
+            "run; without pacing the calibration crashes mid-batch on the "
+            "harder query categories. Default 3.0s. Set to 0 to disable."
+        ),
+    )
+    return parser
+
+
+def main() -> int:
+    args = _build_argparser().parse_args()
 
     pairs_path = Path(args.pairs)
     if not pairs_path.exists():
@@ -100,7 +116,9 @@ def main() -> int:
         pairs = yaml.safe_load(f) or []
 
     outcomes: list[PairOutcome] = []
-    for pair in pairs:
+    for i, pair in enumerate(pairs):
+        if i > 0 and args.pair_delay_seconds > 0:
+            time.sleep(args.pair_delay_seconds)
         print(f"\n--- pair {pair['id']}: {pair['question'][:60]} ---")
         try:
             outcome = _run_one(pair)
