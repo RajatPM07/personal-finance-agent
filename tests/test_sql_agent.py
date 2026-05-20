@@ -254,3 +254,102 @@ def test_strict_generation_also_fails_surfaces_to_user():
 
     assert result.final == "surfaced_to_user"
     assert "rephrase" in (result.reason or "").lower()
+
+
+# ── W4.1 calibration triage: DB exec failures route to retry path ──────────
+#
+# Pre-fix: a psycopg `InvalidTextRepresentation` (e.g. from a hallucinated
+# `WHERE user_id = 'your_user_id'` literal) raised straight out of
+# `_exec_select`, crashed `run_sql_agent`, and the user got an opaque
+# "Something went wrong" — the retry-on-wrong-verdict path was never reached.
+# Post-fix: a `psycopg.Error` is synthesised into a `verdict=wrong` and routed
+# into the same retry flow the judge would have triggered.
+
+import psycopg  # noqa: E402  — at-bottom on purpose; only the new tests use it
+
+
+def _uuid_cast_error() -> psycopg.Error:
+    """Realistic stand-in for the bug we saw: Groq generated SQL with a
+    string literal `'your_user_id'` cast to uuid; Postgres rejects at exec."""
+    return psycopg.errors.InvalidTextRepresentation(
+        "invalid input syntax for type uuid: 'your_user_id'"
+    )
+
+
+def test_initial_db_exec_failure_routes_into_retry_path_and_succeeds():
+    """Initial _exec_select raises a UUID-cast error → retry path fires with
+    the DB error as the critique → retry SQL succeeds → final='rendered',
+    retried=True. Critically, the agent did NOT crash."""
+    with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
+         patch("skills.finance.agents.sql_agent._exec_select") as m_exec:
+        m_llm.side_effect = [
+            _fake_llm_response(
+                "SELECT count(*) FROM transactions WHERE user_id = 'your_user_id'"
+            ),
+            # No initial judge call expected — DB error short-circuits it.
+            # Retry round 1: corrected SQL, then judge=ok.
+            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(json.dumps({
+                "verdict": "ok", "confidence": 0.95, "reason": "fixed",
+            })),
+        ]
+        m_exec.side_effect = [_uuid_cast_error(), [{"count": 1227}]]
+
+        result = run_sql_agent("How many transactions?")
+
+    assert result.final == "rendered"
+    assert result.retried is True
+    assert result.rows == [{"count": 1227}]
+    # The retry prompt must contain the DB error text as critique.
+    retry_gen_prompt = m_llm.call_args_list[1][0][1]
+    assert "DB execution failed" in retry_gen_prompt
+    assert "your_user_id" in retry_gen_prompt
+    # Critical: no initial judge call (we skipped straight to retry on DB error).
+    called_tasks = [c[0][0] for c in m_llm.call_args_list]
+    assert called_tasks == ["sql_agent", "sql_agent", "sql_agent_judge"]
+
+
+def test_db_exec_failure_persists_through_all_retries_and_strict_surfaces():
+    """Every _exec_select raises (initial + 2 retries + strict-gen) →
+    final='surfaced_to_user'. No crash."""
+    with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
+         patch("skills.finance.agents.sql_agent._exec_select") as m_exec:
+        m_llm.side_effect = [
+            _fake_llm_response("SELECT 1 FROM transactions WHERE user_id = 'x'"),
+            # Retry 1: another broken SQL (validator passes, exec raises).
+            _fake_llm_response("SELECT 2 FROM transactions WHERE user_id = 'y'"),
+            # Retry 2: same.
+            _fake_llm_response("SELECT 3 FROM transactions WHERE user_id = 'z'"),
+            # Strict gen: also broken.
+            _fake_llm_response("SELECT 4 FROM transactions WHERE user_id = 'w'"),
+        ]
+        m_exec.side_effect = [
+            _uuid_cast_error(),
+            _uuid_cast_error(),
+            _uuid_cast_error(),
+            _uuid_cast_error(),
+        ]
+
+        result = run_sql_agent("query that keeps hallucinating user_id")
+
+    assert result.final == "surfaced_to_user"
+    assert "rephrase" in (result.reason or "").lower()
+    # All four _exec_select invocations fired and were handled gracefully.
+    assert m_exec.call_count == 4
+
+
+def test_non_psycopg_exception_from_exec_propagates_to_caller():
+    """We deliberately only swallow `psycopg.Error`. A `RuntimeError` (or any
+    other unexpected class) must crash out so unknown bugs surface, not get
+    silently swallowed as a fake wrong-verdict."""
+    with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
+         patch("skills.finance.agents.sql_agent._exec_select") as m_exec:
+        m_llm.return_value = _fake_llm_response("SELECT 1 FROM transactions")
+        m_exec.side_effect = RuntimeError("something else broke")
+
+        try:
+            run_sql_agent("anything")
+        except RuntimeError as e:
+            assert "something else broke" in str(e)
+        else:
+            raise AssertionError("RuntimeError should have propagated")

@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import psycopg
+
 from skills.finance.agents.judge import (
     JudgeVerdict,
     build_judge_prompt,
@@ -102,31 +104,47 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
             reason=val.reason,
         )
 
-    # 3. Execute on readonly DB.
-    rows = _exec_select(sql)
-
-    # 4. Judge.
-    judge_prompt = build_judge_prompt(
-        question=question, sql=sql, result_preview=rows,
-        schema_excerpt=schema,
-    )
-    judge_resp = llm(
-        "sql_agent_judge",
-        judge_prompt,
-        response_format={"type": "json_object"},
-    )
-    verdict = parse_judge_response(judge_resp.choices[0].message.content)
-
-    # 5. Happy path: render only if verdict=ok AND confidence high enough.
-    if verdict.verdict == "ok" and verdict.confidence >= cfg.confidence_threshold:
-        return AgentResult(
-            final="rendered", sql=sql, rows=rows,
-            judge_verdict=verdict, validator_result=val,
-            escalated=False, retried=False, reason=None,
+    # 3. Execute on readonly DB. DB exec failures (e.g. UUID-cast errors from
+    #    a hallucinated `'your_user_id'` literal) are routed into the retry
+    #    path as a synthesized wrong-verdict instead of crashing the agent.
+    db_exec_failed = False
+    rows: list[dict] = []
+    verdict: JudgeVerdict
+    try:
+        rows = _exec_select(sql)
+    except psycopg.Error as e:
+        db_exec_failed = True
+        verdict = JudgeVerdict(
+            verdict="wrong",
+            confidence=0.99,
+            reason=f"DB execution failed: {e}",
         )
 
+    if not db_exec_failed:
+        # 4. Judge.
+        judge_prompt = build_judge_prompt(
+            question=question, sql=sql, result_preview=rows,
+            schema_excerpt=schema,
+        )
+        judge_resp = llm(
+            "sql_agent_judge",
+            judge_prompt,
+            response_format={"type": "json_object"},
+        )
+        verdict = parse_judge_response(judge_resp.choices[0].message.content)
+
+        # 5. Happy path: render only if verdict=ok AND confidence high enough.
+        if verdict.verdict == "ok" and verdict.confidence >= cfg.confidence_threshold:
+            return AgentResult(
+                final="rendered", sql=sql, rows=rows,
+                judge_verdict=verdict, validator_result=val,
+                escalated=False, retried=False, reason=None,
+            )
+
     # 6. Escalation path — Sonnet strict judge — for uncertain or low-confidence-ok.
-    if verdict.verdict in ("uncertain",) or (verdict.verdict == "ok" and verdict.confidence < cfg.confidence_threshold):
+    #    Skipped when the initial call hit a DB error (we know the SQL is broken,
+    #    no benefit to running judges; go straight to retry).
+    if not db_exec_failed and (verdict.verdict in ("uncertain",) or (verdict.verdict == "ok" and verdict.confidence < cfg.confidence_threshold)):
         strict_resp = llm(
             "sql_agent_judge_strict",
             judge_prompt,
@@ -162,7 +180,17 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
         if not val.ok:
             continue  # validator failure on retry; loop again with same critique
 
-        current_rows = _exec_select(current_sql)
+        try:
+            current_rows = _exec_select(current_sql)
+        except psycopg.Error as e:
+            # DB exec failed on this retry too — feed the error as the next
+            # critique and try again without burning a judge call.
+            current_verdict = JudgeVerdict(
+                verdict="wrong",
+                confidence=0.99,
+                reason=f"DB execution failed: {e}",
+            )
+            continue
         retry_judge_prompt = build_judge_prompt(
             question=question, sql=current_sql, result_preview=current_rows,
             schema_excerpt=schema,
@@ -192,22 +220,32 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
 
     val = validate_sql(strict_sql, ALLOWED_TABLES)
     if val.ok:
-        strict_rows = _exec_select(strict_sql)
-        strict_judge_resp = llm(
-            "sql_agent_judge",
-            build_judge_prompt(
-                question=question, sql=strict_sql, result_preview=strict_rows,
-                schema_excerpt=schema,
-            ),
-            response_format={"type": "json_object"},
-        )
-        strict_judge_verdict = parse_judge_response(strict_judge_resp.choices[0].message.content)
-        if strict_judge_verdict.verdict == "ok":
-            return AgentResult(
-                final="rendered", sql=strict_sql, rows=strict_rows,
-                judge_verdict=strict_judge_verdict, validator_result=val,
-                escalated=True, retried=True, reason=None,
+        try:
+            strict_rows = _exec_select(strict_sql)
+        except psycopg.Error as e:
+            # Strict-gen SQL also blew up at the DB. Fall through to the
+            # surface-to-user path with the DB error as the surfaced reason.
+            current_verdict = JudgeVerdict(
+                verdict="wrong",
+                confidence=0.99,
+                reason=f"DB execution failed: {e}",
             )
+        else:
+            strict_judge_resp = llm(
+                "sql_agent_judge",
+                build_judge_prompt(
+                    question=question, sql=strict_sql, result_preview=strict_rows,
+                    schema_excerpt=schema,
+                ),
+                response_format={"type": "json_object"},
+            )
+            strict_judge_verdict = parse_judge_response(strict_judge_resp.choices[0].message.content)
+            if strict_judge_verdict.verdict == "ok":
+                return AgentResult(
+                    final="rendered", sql=strict_sql, rows=strict_rows,
+                    judge_verdict=strict_judge_verdict, validator_result=val,
+                    escalated=True, retried=True, reason=None,
+                )
 
     # 9. Surface to user — even the strict generator couldn't satisfy the judge.
     return AgentResult(
