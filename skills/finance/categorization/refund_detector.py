@@ -8,13 +8,18 @@ pipeline.py via adb() so the synchronous DB calls don't block the async loop.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+import logging
+import re
+from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import yaml
 from rapidfuzz import fuzz
+
+logger = logging.getLogger(__name__)
 
 _PATTERNS_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "self_transfer_patterns.yaml"
@@ -198,3 +203,287 @@ def _find_self_transfer_match(
     if best is not None:
         return best
     return PENDING
+
+
+@dataclass(frozen=True)
+class DetectionResult:
+    refunds_linked: int = 0
+    self_transfers_linked: int = 0
+    rows_processed: int = 0
+    rows_pending: int = 0
+
+
+_PATTERNS_CACHE: dict[UUID, list[str]] | None = None
+
+
+def _get_patterns() -> dict[UUID, list[str]]:
+    global _PATTERNS_CACHE
+    if _PATTERNS_CACHE is None:
+        _PATTERNS_CACHE = _load_patterns()
+    return _PATTERNS_CACHE
+
+
+def detect_for_account(
+    account_id: UUID,
+    since: date | None = None,
+    _conn_for_test: Any = None,
+) -> DetectionResult:
+    """Detect refunds + self-transfers for rows on this account.
+
+    Two phases per spec §5.2 + §5.3:
+      A. Process new direction='in' rows on this account.
+      B. New direction='out' rows on this account may unblock pending
+         pattern-credits on OTHER accounts.
+
+    `_conn_for_test`: when provided (test mode), uses this psycopg connection
+    for both reads and writes (so transaction-rollback fixture works).
+    In production: SELECTs via readonly_client(), UPDATEs via service_client().
+    """
+    patterns = _get_patterns()
+
+    if _conn_for_test is not None:
+        return _detect_with_conn(account_id, since, _conn_for_test, patterns)
+    else:
+        from skills.finance.lib.db import readonly_client, service_client
+        return _detect_production(account_id, since, patterns,
+                                   readonly_client(), service_client())
+
+
+def _detect_with_conn(
+    account_id: UUID,
+    since: date | None,
+    conn: Any,
+    patterns: dict[UUID, list[str]],
+) -> DetectionResult:
+    """Test-mode detection using a single psycopg connection for both reads
+    and writes (transaction-rollback fixture relies on a single conn)."""
+    return _detect_impl(
+        account_id, since, patterns,
+        read=lambda sql, params: _exec_fetch(conn, sql, params),
+        write=lambda sql, params: _exec(conn, sql, params),
+    )
+
+
+def _detect_production(
+    account_id: UUID,
+    since: date | None,
+    patterns: dict[UUID, list[str]],
+    readonly_conn: Any,
+    service_client_: Any,
+) -> DetectionResult:
+    """Production-mode detection: psycopg readonly for SELECT (bypasses
+    Supabase 1000-row cap per spec §5.5), service client for UPDATE writes.
+
+    The write adapter parses a fixed set of internal UPDATE shapes and dispatches
+    to supabase-py's .table().update().eq() API. Only 4 SQL shapes are produced
+    by _detect_impl; the regex parser refuses unknown shapes (fail loud).
+    """
+    def _write(sql: str, params: tuple) -> None:
+        m = re.match(r"UPDATE transactions SET (.+) WHERE id = %s$", sql)
+        if not m:
+            raise ValueError(f"Unsupported UPDATE shape: {sql!r}")
+        set_clause = m.group(1)
+        txn_id = params[-1]
+        assignments: dict[str, Any] = {}
+        placeholder_idx = 0
+        for part in [p.strip() for p in set_clause.split(",")]:
+            col, _sep, val = part.partition(" = ")
+            if val == "true":
+                assignments[col] = True
+            elif val == "false":
+                assignments[col] = False
+            elif val == "%s":
+                assignments[col] = str(params[placeholder_idx])
+                placeholder_idx += 1
+            else:
+                raise ValueError(f"Unsupported SET value in {sql!r}: {part!r}")
+        service_client_.table("transactions").update(assignments).eq("id", str(txn_id)).execute()
+
+    return _detect_impl(
+        account_id, since, patterns,
+        read=lambda sql, params: _exec_fetch(readonly_conn, sql, params),
+        write=_write,
+    )
+
+
+def _detect_impl(
+    account_id: UUID,
+    since: date | None,
+    patterns: dict[UUID, list[str]],
+    read: Any,
+    write: Any,
+) -> DetectionResult:
+    """The detection algorithm, parameterised on read/write callables so the
+    same logic runs in test mode (single psycopg conn, transaction-rollback)
+    and production mode (split read/write)."""
+    refunds_linked = 0
+    self_transfers_linked = 0
+    rows_processed = 0
+    rows_pending = 0
+
+    # --- Phase A: new credits on this account ------------------------------
+    since_clause = "AND date >= %s" if since is not None else ""
+    since_params: tuple = (since,) if since is not None else ()
+    credits = read(
+        f"""
+        SELECT id, account_id, date, amount, direction, raw_merchant,
+               is_refund, is_self_transfer, linked_txn_id
+        FROM transactions
+        WHERE account_id = %s AND direction = 'in'
+          AND (is_refund IS NULL OR is_self_transfer IS NULL)
+          {since_clause}
+        ORDER BY date
+        """,
+        (account_id,) + since_params,
+    )
+
+    acct_patterns = patterns.get(account_id, [])
+    for credit in credits:
+        # Respect already-set flags (user overrides or prior detection runs).
+        # The outer SELECT picks up rows where EITHER flag is NULL — but a row
+        # may have `is_refund=true` set by the user with `is_self_transfer=NULL`
+        # still pending; we must skip the refund check on that row.
+        already_refund = credit["is_refund"] is not None
+        already_self_transfer = credit["is_self_transfer"] is not None
+
+        st_match: Any | _Pending | None = None
+        if acct_patterns and not already_self_transfer and not already_refund:
+            debit_lookup_since = credit["date"] - timedelta(days=_SELF_TRANSFER_WINDOW_DAYS)
+            debit_lookup_until = credit["date"] + timedelta(days=_SELF_TRANSFER_WINDOW_DAYS)
+            cross_debits = read(
+                """
+                SELECT id, account_id, date, amount, direction, raw_merchant,
+                       is_refund, is_self_transfer
+                FROM transactions
+                WHERE direction = 'out'
+                  AND account_id != %s
+                  AND amount = %s
+                  AND date BETWEEN %s AND %s
+                  AND (is_self_transfer IS NULL OR is_self_transfer = false)
+                """,
+                (account_id, credit["amount"], debit_lookup_since, debit_lookup_until),
+            )
+            st_match = _find_self_transfer_match(credit, cross_debits, acct_patterns)
+
+        if st_match is PENDING:
+            rows_pending += 1
+            continue
+        if st_match is not None and st_match is not PENDING:
+            # st_match is a row dict at this point; narrow for mypy.
+            st_row: Any = st_match
+            write(
+                "UPDATE transactions SET is_self_transfer = true, linked_txn_id = %s WHERE id = %s",
+                (st_row["id"], credit["id"]),
+            )
+            write(
+                "UPDATE transactions SET is_self_transfer = true WHERE id = %s",
+                (st_row["id"],),
+            )
+            self_transfers_linked += 1
+            rows_processed += 1
+            continue
+
+        # Refund check — skip if user already set is_refund or row was
+        # previously flagged as a self-transfer.
+        if already_refund or already_self_transfer:
+            continue
+
+        debit_lookup_since = credit["date"] - timedelta(days=_REFUND_WINDOW_DAYS)
+        debit_lookup_until = credit["date"] - timedelta(days=1)
+        refund_candidates = read(
+            """
+            SELECT id, account_id, date, amount, direction, raw_merchant,
+                   is_refund, is_self_transfer
+            FROM transactions
+            WHERE account_id = %s AND direction = 'out'
+              AND amount = %s
+              AND date BETWEEN %s AND %s
+              AND (is_refund IS NULL OR is_refund = false)
+              AND (is_self_transfer IS NULL OR is_self_transfer = false)
+            """,
+            (account_id, credit["amount"], debit_lookup_since, debit_lookup_until),
+        )
+        refund_match = _find_refund_match(credit, refund_candidates)
+        if refund_match is not None:
+            write(
+                "UPDATE transactions SET is_refund = true, linked_txn_id = %s WHERE id = %s",
+                (refund_match["id"], credit["id"]),
+            )
+            refunds_linked += 1
+            rows_processed += 1
+        else:
+            # No match either way: mark processed (per 3.i)
+            write(
+                "UPDATE transactions SET is_refund = false, is_self_transfer = false WHERE id = %s",
+                (credit["id"],),
+            )
+            rows_processed += 1
+
+    # --- Phase B: new debits on this account may unblock pending elsewhere -
+    new_debits = read(
+        f"""
+        SELECT id, account_id, date, amount FROM transactions
+        WHERE account_id = %s AND direction = 'out'
+          {since_clause}
+        """,
+        (account_id,) + since_params,
+    )
+    for debit in new_debits:
+        d_window_start = debit["date"] - timedelta(days=_SELF_TRANSFER_WINDOW_DAYS)
+        d_window_end = debit["date"] + timedelta(days=_SELF_TRANSFER_WINDOW_DAYS)
+        pending_credits = read(
+            """
+            SELECT id, account_id, date, amount, raw_merchant
+            FROM transactions
+            WHERE direction = 'in'
+              AND account_id != %s
+              AND amount = %s
+              AND date BETWEEN %s AND %s
+              AND is_self_transfer IS NULL
+            """,
+            (account_id, debit["amount"], d_window_start, d_window_end),
+        )
+        for cand in pending_credits:
+            cand_patterns = patterns.get(cand["account_id"], [])
+            if _matches_self_transfer(cand["raw_merchant"], cand_patterns):
+                write(
+                    "UPDATE transactions SET is_self_transfer = true, linked_txn_id = %s WHERE id = %s",
+                    (debit["id"], cand["id"]),
+                )
+                write(
+                    "UPDATE transactions SET is_self_transfer = true WHERE id = %s",
+                    (debit["id"],),
+                )
+                self_transfers_linked += 1
+                rows_processed += 1
+                break  # one debit unblocks at most one credit
+
+    return DetectionResult(
+        refunds_linked=refunds_linked,
+        self_transfers_linked=self_transfers_linked,
+        rows_processed=rows_processed,
+        rows_pending=rows_pending,
+    )
+
+
+# --- minimal psycopg helpers ------------------------------------------------
+
+def _exec_fetch(conn: Any, sql: str, params: tuple) -> list[dict]:
+    """Execute SELECT, return list of dicts."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        if cur.description is None:
+            return []
+        cols = [d.name if hasattr(d, "name") else d[0] for d in cur.description]
+        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
+
+
+def _exec(conn: Any, sql: str, params: tuple) -> None:
+    """Execute non-returning statement."""
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def _exec_fetch_psycopg(conn: Any, sql: str, params: tuple) -> list[dict]:
+    """Alias kept for clarity in the production split."""
+    return _exec_fetch(conn, sql, params)

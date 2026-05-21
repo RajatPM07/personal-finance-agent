@@ -230,3 +230,201 @@ def test_self_transfer_cross_account_with_is_self_transfer_true_excluded():
     patterns = ["PAYMENT RECEIVED. THANK YOU"]
     match = _find_self_transfer_match(credit, [debit], patterns)
     assert match is PENDING
+
+
+# --- detect_for_account integration tests (live DB, gated) ------------------
+
+import psycopg  # noqa: E402
+import pytest  # noqa: E402
+
+from skills.finance.categorization.refund_detector import (  # noqa: E402
+    detect_for_account,
+)
+
+
+def _readonly_password_available() -> bool:
+    try:
+        from skills.finance.lib.settings import settings
+        return bool(settings.supabase_readonly_password)
+    except Exception:
+        return False
+
+
+_LIVE = pytest.mark.skipif(
+    not _readonly_password_available(),
+    reason="SUPABASE_READONLY_PASSWORD not in settings — live integration tests skipped",
+)
+
+# Reusable account UUIDs from 003_seed.local.sql.
+SAVINGS = UUID("10000000-0000-0000-0000-000000000001")
+
+
+def _write_dsn() -> str:
+    """Service-role psycopg DSN for INSERT/UPDATE — we use the SUPABASE_DB_URL
+    directly (same DSN scripts/backup_supabase.py uses). All test writes are
+    inside a transaction that's rolled back at teardown — seeded rows never
+    persist."""
+    from skills.finance.lib.settings import settings
+    return settings.supabase_db_url
+
+
+@pytest.fixture
+def write_conn():
+    """Open a transaction we'll roll back at teardown. Tests INSERT into
+    transactions through this connection and assert via direct SELECTs;
+    no row commits. Per spec §8.3 decision 6.i."""
+    conn = psycopg.connect(_write_dsn(), autocommit=False)
+    try:
+        yield conn
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def _insert(conn, **fields) -> UUID:
+    """Insert one transactions row with given fields, return the id."""
+    fields.setdefault("id", uuid4())
+    fields.setdefault("user_id", UUID("00000000-0000-0000-0000-000000000001"))  # Rajat
+    fields.setdefault("currency", "INR")
+    cols = ",".join(fields.keys())
+    placeholders = ",".join(["%s"] * len(fields))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO transactions ({cols}) VALUES ({placeholders})",
+            list(fields.values()),
+        )
+    return fields["id"]
+
+
+def _select_flags(conn, txn_id: UUID) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_refund, is_self_transfer, linked_txn_id FROM transactions WHERE id = %s",
+            (txn_id,),
+        )
+        r = cur.fetchone()
+        return {
+            "is_refund": r[0], "is_self_transfer": r[1], "linked_txn_id": r[2],
+        }
+
+
+# Integration-test dates are pushed to year 2099 to isolate from the 1227
+# pre-existing rows in the live DB. The `since` filter scopes Phase A reads;
+# Phase B's debit window is keyed off the seeded debit's date, so the ±2d
+# window also lands in 2099 — no live rows can drift into either query.
+
+@_LIVE
+def test_refund_happy_path(write_conn):
+    """Seed: AMEX debit + matching credit. Run detect_for_account. Assert
+    is_refund=true + linked_txn_id pointing to the debit."""
+    debit_id = _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 1),
+        amount=Decimal("500.00"), direction="out",
+        raw_merchant="Amazon", is_refund=None,
+    )
+    credit_id = _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 15),
+        amount=Decimal("500.00"), direction="in",
+        raw_merchant="Amazon Mumbai", is_refund=None,
+    )
+    result = detect_for_account(
+        AMEX_CC, since=date(2099, 2, 1),
+        _conn_for_test=write_conn,
+    )
+    flags = _select_flags(write_conn, credit_id)
+    assert flags["is_refund"] is True
+    assert flags["linked_txn_id"] == debit_id
+    assert result.refunds_linked == 1
+
+
+@_LIVE
+def test_self_transfer_happy_path(write_conn):
+    """Seed: AMEX credit with PAYMENT RECEIVED + savings matching debit.
+    Assert both flagged, linked_txn_id only on CC."""
+    debit_id = _insert(
+        write_conn, account_id=SAVINGS, date=date(2099, 3, 14),
+        amount=Decimal("60000.00"), direction="out",
+        raw_merchant="AMEX CC BILL PAYMENT", is_self_transfer=None,
+    )
+    credit_id = _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 15),
+        amount=Decimal("60000.00"), direction="in",
+        raw_merchant="PAYMENT RECEIVED. THANK YOU",
+        is_self_transfer=None,
+    )
+    result = detect_for_account(
+        AMEX_CC, since=date(2099, 2, 1),
+        _conn_for_test=write_conn,
+    )
+    cc_flags = _select_flags(write_conn, credit_id)
+    savings_flags = _select_flags(write_conn, debit_id)
+    assert cc_flags["is_self_transfer"] is True
+    assert cc_flags["linked_txn_id"] == debit_id
+    assert savings_flags["is_self_transfer"] is True
+    assert savings_flags["linked_txn_id"] is None  # one-way FK
+    assert result.self_transfers_linked == 1
+
+
+@_LIVE
+def test_phase_b_catch_up(write_conn):
+    """Ingest CC credit first (no savings yet) → leaves pending. Then ingest
+    savings debit; running detect_for_account(savings) Phase B unblocks the
+    CC credit."""
+    credit_id = _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 15),
+        amount=Decimal("60000.00"), direction="in",
+        raw_merchant="PAYMENT RECEIVED. THANK YOU",
+        is_self_transfer=None,
+    )
+    # First detect — no savings debit yet
+    r1 = detect_for_account(AMEX_CC, since=date(2099, 2, 1), _conn_for_test=write_conn)
+    cc_flags_1 = _select_flags(write_conn, credit_id)
+    assert cc_flags_1["is_self_transfer"] is None  # still pending
+    assert r1.rows_pending == 1
+    # Now seed savings debit and run detection for savings
+    debit_id = _insert(
+        write_conn, account_id=SAVINGS, date=date(2099, 3, 14),
+        amount=Decimal("60000.00"), direction="out",
+        raw_merchant="AMEX BILL", is_self_transfer=None,
+    )
+    r2 = detect_for_account(SAVINGS, since=date(2099, 2, 1), _conn_for_test=write_conn)
+    cc_flags_2 = _select_flags(write_conn, credit_id)
+    savings_flags = _select_flags(write_conn, debit_id)
+    assert cc_flags_2["is_self_transfer"] is True
+    assert cc_flags_2["linked_txn_id"] == debit_id
+    assert savings_flags["is_self_transfer"] is True
+    assert r2.self_transfers_linked == 1
+
+
+@_LIVE
+def test_idempotent_re_run_is_noop(write_conn):
+    """First run processes a row; second run is a no-op (skips via IS NULL guard)."""
+    _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 15),
+        amount=Decimal("500.00"), direction="in",
+        raw_merchant="Random Merchant", is_refund=None,
+    )
+    r1 = detect_for_account(AMEX_CC, since=date(2099, 2, 1), _conn_for_test=write_conn)
+    r2 = detect_for_account(AMEX_CC, since=date(2099, 2, 1), _conn_for_test=write_conn)
+    assert r1.rows_processed >= 1
+    assert r2.rows_processed == 0
+
+
+@_LIVE
+def test_user_override_preserved(write_conn):
+    """A row already flagged is_refund=true is left alone on detection runs."""
+    debit_id = _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 1),
+        amount=Decimal("500.00"), direction="out", raw_merchant="Amazon",
+    )
+    credit_id = _insert(
+        write_conn, account_id=AMEX_CC, date=date(2099, 3, 15),
+        amount=Decimal("500.00"), direction="in", raw_merchant="Amazon Mumbai",
+        is_refund=True,  # user-overridden to TRUE before detection
+        linked_txn_id=debit_id,
+    )
+    r = detect_for_account(AMEX_CC, since=date(2099, 2, 1), _conn_for_test=write_conn)
+    flags = _select_flags(write_conn, credit_id)
+    assert flags["is_refund"] is True   # untouched
+    assert flags["linked_txn_id"] == debit_id   # untouched
+    assert r.refunds_linked == 0   # detector didn't re-process this row
