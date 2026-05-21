@@ -52,6 +52,11 @@ def _load_patterns(path: Path | None = None) -> dict[UUID, list[str]]:
                     "would match every row."
                 )
         out[acct] = list(patterns)
+    if len(out) == 0:
+        raise ValueError(
+            f"{p}: no account patterns found — empty config would silently process "
+            "every row as not-a-self-transfer, the exact §7 hazard this loader exists to prevent."
+        )
     return out
 
 

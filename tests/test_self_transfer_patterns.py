@@ -67,6 +67,34 @@ def test_load_empty_pattern_string_raises(tmp_path):
         _load_patterns(p)
 
 
+def test_load_empty_file_raises(tmp_path):
+    """An empty yaml file would coalesce to {} and silently load zero patterns —
+    precisely the §7 hazard. Refuse."""
+    p = tmp_path / "empty.yaml"
+    p.write_text("")
+    with pytest.raises(ValueError, match="no account patterns"):
+        _load_patterns(p)
+
+
+def test_load_only_comments_yaml_raises(tmp_path):
+    """A yaml file containing only comments parses to None and would coalesce
+    to {} — same §7 hazard as an empty file."""
+    p = tmp_path / "comments_only.yaml"
+    p.write_text("# just a comment\n# another one\n")
+    with pytest.raises(ValueError, match="no account patterns"):
+        _load_patterns(p)
+
+
+def test_load_non_utf8_file_raises(tmp_path):
+    """A non-UTF-8 file (binary garbage) raises a decoding-class error from
+    open() before yaml ever gets it. The §7 invariant is broader than 'YAMLError'
+    — any malformed input should fail loud. The test pins the broader contract."""
+    p = tmp_path / "binary.yaml"
+    p.write_bytes(b"\xff\xfe\xff\xfe not valid utf-8")
+    with pytest.raises((UnicodeDecodeError, yaml.YAMLError, ValueError)):
+        _load_patterns(p)
+
+
 def test_matches_self_transfer_case_insensitive():
     """Substring match, case-insensitive, multi-pattern OR."""
     patterns = ["BBPS Payment received", "PAYMENT RECEIVED. THANK YOU"]
