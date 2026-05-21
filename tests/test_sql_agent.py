@@ -98,12 +98,24 @@ def test_genuine_empty_result_passes_judge():
 
 def test_low_confidence_escalates_to_strict_judge():
     """verdict=ok but confidence < threshold → escalate to sql_agent_judge_strict.
-    If strict judge says ok, render."""
+    If strict judge says ok, render.
+
+    The committed default `confidence_threshold` is 0.0 (post-2026-05-21
+    calibration §5.0 tight-cluster decision), at which value low-confidence
+    never blocks. Pass an explicit non-zero ReviewConfig so this test
+    exercises the still-live code path independent of the default.
+    """
+    from skills.finance.agents.review_config import ReviewConfig
+    cfg = ReviewConfig(
+        confidence_threshold=0.85,
+        max_retry_rounds=2,
+        anthropic_balance_warning_usd=3.0,
+    )
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
             _fake_llm_response("SELECT count(*) FROM transactions"),
-            # Gemini: ok but low confidence
+            # Gemini: ok but low confidence (below the 0.85 threshold)
             _fake_llm_response(json.dumps({
                 "verdict": "ok", "confidence": 0.5, "reason": "looks ok-ish",
             })),
@@ -114,7 +126,7 @@ def test_low_confidence_escalates_to_strict_judge():
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("How many transactions total?")
+        result = run_sql_agent("How many transactions total?", cfg=cfg)
 
     assert result.final == "rendered"
     assert result.escalated is True
