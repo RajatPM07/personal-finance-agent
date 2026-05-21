@@ -8,14 +8,20 @@ pipeline.py via adb() so the synchronous DB calls don't block the async loop.
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import yaml
+from rapidfuzz import fuzz
 
 _PATTERNS_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "self_transfer_patterns.yaml"
 )
+
+_FUZZ_THRESHOLD = 80
+_REFUND_WINDOW_DAYS = 30
 
 
 def _load_patterns(path: Path | None = None) -> dict[UUID, list[str]]:
@@ -66,3 +72,61 @@ def _matches_self_transfer(raw_merchant: str | None, patterns: list[str]) -> boo
         return False
     haystack = raw_merchant.casefold()
     return any(p.casefold() in haystack for p in patterns)
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Tolerant attr-or-subscript access — _find_refund_match accepts both
+    dict-like rows (from psycopg) and dataclass-like rows (from tests)."""
+    if hasattr(row, key):
+        return getattr(row, key)
+    if hasattr(row, "__getitem__"):
+        try:
+            return row[key]
+        except (KeyError, TypeError):
+            pass
+    return default
+
+
+def _find_refund_match(credit: Any, candidates: list[Any]) -> Any | None:
+    """Pick the best refund original for `credit` from `candidates`.
+
+    Returns the chosen candidate row (or None if none qualify).
+    Per spec §5.2 step 2 + D2 + D6: exact amount, same account, fuzzy merchant
+    >= 80, window [credit.date - 30d, credit.date - 1d], exclude candidates
+    already flagged as refund or self-transfer. On ties, smallest date delta wins.
+    """
+    credit_merchant = _row_get(credit, "raw_merchant")
+    if not credit_merchant:
+        return None
+    credit_date = _row_get(credit, "date")
+    credit_amount = _row_get(credit, "amount")
+    credit_account = _row_get(credit, "account_id")
+
+    earliest_allowed = credit_date - timedelta(days=_REFUND_WINDOW_DAYS)
+    latest_allowed = credit_date - timedelta(days=1)
+
+    best: Any | None = None
+    best_delta: int | None = None
+    for c in candidates:
+        if _row_get(c, "account_id") != credit_account:
+            continue
+        if _row_get(c, "amount") != credit_amount:
+            continue
+        c_date = _row_get(c, "date")
+        if c_date < earliest_allowed or c_date > latest_allowed:
+            continue
+        if _row_get(c, "is_refund") is True:
+            continue
+        if _row_get(c, "is_self_transfer") is True:
+            continue
+        c_merchant = _row_get(c, "raw_merchant")
+        if not c_merchant:
+            continue
+        score = fuzz.token_set_ratio(credit_merchant, c_merchant)
+        if score < _FUZZ_THRESHOLD:
+            continue
+        delta = (credit_date - c_date).days
+        if best is None or (best_delta is not None and delta < best_delta):
+            best = c
+            best_delta = delta
+    return best
