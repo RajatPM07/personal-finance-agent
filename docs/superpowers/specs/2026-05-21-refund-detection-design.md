@@ -154,7 +154,7 @@ For each `direction='in'` row where `(is_refund IS NULL OR is_self_transfer IS N
        - same `user_id` (V1 no-op; forward-looking for multi-tenant)
        - **Exactly one match** → set both rows' `is_self_transfer = true`; set the CC row's `linked_txn_id = <debit.id>`. Done.
        - **Multiple matches** → pick smallest date delta; tie-break smallest amount delta (amount is exact, so this rarely fires).
-       - **No match yet** → leave the CC row's `is_self_transfer = NULL` (don't mark as processed; wait for the savings statement to land). Increment `rows_pending`. **Continue to step 2** — the pattern-hit doesn't preempt the refund check. Patterns like "PAYMENT RECEIVED" don't fuzzy-match real merchant names, so this is safe.
+       - **No match yet** → leave the CC row's `is_self_transfer = NULL` (don't mark as processed; wait for the savings statement to land). Increment `rows_pending`. **Skip to the next credit row** — do NOT run the refund check on this row. Rationale: a pattern-matched row is in mid-classification (we're confident it'll resolve to self-transfer once the savings statement arrives); writing `is_refund = false` now would mark a not-yet-fully-classified row as "refund-processed," which conflates two distinct states. Patterns like "PAYMENT RECEIVED" don't fuzzy-match real merchant names anyway, so the refund check would always miss — saving the SELECT is a small bonus on top of the cleaner semantics.
 
 2. **Refund check** (only reached if step 1 didn't auto-link as self-transfer):
    - Find `direction='out'` rows on the SAME `account_id` with:
