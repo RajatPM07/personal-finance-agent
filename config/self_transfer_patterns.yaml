@@ -1,0 +1,12 @@
+# W5.1 self-transfer pattern config.
+# Keyed by account_id (UUID strings from migrations/003_seed*.sql).
+# Patterns are case-insensitive substrings checked against transactions.raw_merchant.
+# Adding a new bank source = add an account_id key + its marker substrings; no code change.
+
+# ICICI CC — account_id from 003_seed.local.sql
+"10000000-0000-0000-0000-000000000003":
+  - "BBPS Payment received"
+
+# AMEX CC — account_id from 003_seed.local.sql
+"10000000-0000-0000-0000-000000000005":
+  - "PAYMENT RECEIVED. THANK YOU"
