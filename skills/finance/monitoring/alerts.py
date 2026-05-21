@@ -17,6 +17,7 @@ Contract:
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
 from aiogram import Bot
 
@@ -56,9 +57,10 @@ def _fetch_anthropic_balance_usd() -> float:
         .ilike("model", "%anthropic%")
         .execute()
     )
+    data = cast(list[dict[str, Any]], res.data or [])
     spent = sum(
         float(r.get("response_cost") or 0.0)
-        for r in (res.data or [])
+        for r in data
     )
     return initial_credit_usd - spent
 
