@@ -167,3 +167,26 @@ Format: date → pattern → root cause → rule.
 **Implementation agent:** All 16 tasks implemented by the Anti-Gravity Agent (Antigravity by Google DeepMind).
 
 **Remaining USER action:** Create `tests/sql_agent_calibration/pairs.yaml` with ~20 real financial questions and run the calibration harness to validate confidence distribution and escalation rate before declaring W4.1 production-ready.
+
+---
+
+## 2026-05-21 — W4.1 calibration close-out: paranoid judge accepted as V1 trade
+
+**Pattern:** First calibration run (synthetic, pre-triage) completed only 5/20 pairs due to Groq RPM limits + a `'your_user_id'` UUID hallucination crashing pairs before the retry path could fire. The natural temptation was to declare success on the 5-pair sample because the surface metric ("escalation rate 20%") happened to land on target.
+
+**Why that was wrong:** n=5 is statistically noise (spec §5.4 already flagged n=20 as "directional, not significant"); 0 of the 5 had `verdict=wrong`, so judge recall on wrong SQL was *undefined*, not "100%"; the 15 missing pairs clustered systematically on the hardest query categories (multi-table joins, time-window comparisons), giving a sample biased toward easy wins. Same surface number for opposite underlying reasons.
+
+**What we did instead:** triage (`0458e12`, `8b2baef`, `c422983`, `f39660e`) addressed root causes — schema excerpt no longer instructs Groq to filter by an unknown user_id; `llm()` retries on `RateLimitError` with exponential backoff; psycopg execution errors route into the retry path instead of crashing; calibration runner paces pairs at 3s/each to stay under Groq's ~30 RPM. Re-ran calibration: 19/20 pairs completed (id=1 missed by chance), full category coverage.
+
+**Final calibration numbers (2026-05-21, n=19):**
+- Judge recall on wrong SQL: **100%** (3/3 actually-wrong queries caught — ids 11, 18, 19)
+- Judge precision on judge-wrong verdicts: **33%** (1/3 — judge-wrong on ids 7 and 13 were false positives; ids 7 and 13 are valid SQL)
+- Escalation rate: **21.1%** (4/19) — WARN zone, target ≤20%, reject ≥40%; one extra pair on n=19 = ±5%
+- Confidence distribution: tight cluster at 0.9–1.0 (14 of 19 at exactly 1.0) → spec §5.0 says drop `confidence_threshold` to 0.0
+- Validator + uncertain-on-unanswerable layers worked exactly per spec §5.3
+
+**Rule:** When safety and UX-noise trade off, V1 chooses safety. 100% recall (judge never silently passes wrong SQL) is the load-bearing invariant; 33% precision (judge cries wolf 2/3 of the time it raises an alarm) is a UX papercut — false positives surface "rephrase?" to the user, who can iterate, vs the alternative of silently rendering wrong answers as truth. Ship paranoid; tune later on real-usage signal.
+
+**Captured as:** `config/sql_agent_review.yaml` threshold drop with provenance comment; this entry; memory `project_pfa_status.md` updated to reflect calibration outcomes. Spec §7 revisit trigger ("judge false-positive rate > 20% over 30 queries") is essentially already true at 67% on n=3 — but the small-n statistical caveat applies. Re-evaluate after ~30 real `/ask` queries.
+
+**Deferred follow-up:** judge prompt tuning to reduce false-positive rate. Trigger: first month of `/ask` usage shows paranoia is annoying in practice (not just on calibration set), OR scheduled monthly recalibration finds precision still <80% on a real-question sample. Don't tune blind today — without recalibration (blocked by Gemini daily quota), we'd be replacing a known-paranoid judge with an unknown one.
