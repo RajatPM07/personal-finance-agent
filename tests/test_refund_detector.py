@@ -152,3 +152,81 @@ def test_different_account_excluded():
     candidates = [_debit(date(2026, 3, 1), "Amazon", acct=ICICI_CC)]
     match = _find_refund_match(credit, candidates)
     assert match is None
+
+
+# --- self-transfer matcher tests --------------------------------------------
+
+from skills.finance.categorization.refund_detector import (  # noqa: E402
+    PENDING,
+    _find_self_transfer_match,
+)
+
+
+def test_self_transfer_pattern_hit_with_cross_account_match():
+    """Pattern matches AND a cross-account debit with same amount within ±2d
+    exists → returns the debit row."""
+    credit = _credit(merchant="PAYMENT RECEIVED. THANK YOU", acct=AMEX_CC,
+                     date_=date(2026, 3, 15), amount="60000.00")
+    debit = _debit(date(2026, 3, 14), "ACH/AMEX BILL PAYMENT", amount="60000.00",
+                   acct=UUID("10000000-0000-0000-0000-000000000001"))  # savings
+    patterns = ["PAYMENT RECEIVED. THANK YOU"]
+    match = _find_self_transfer_match(credit, [debit], patterns)
+    assert match is not None
+    assert match is not PENDING
+    assert match.id == debit.id
+
+
+def test_self_transfer_pattern_hit_no_cross_account_returns_pending():
+    """Pattern matches but no cross-account debit exists yet → returns PENDING
+    sentinel so caller leaves is_self_transfer=NULL (waits for the savings
+    statement to be ingested)."""
+    credit = _credit(merchant="PAYMENT RECEIVED. THANK YOU", acct=AMEX_CC,
+                     amount="60000.00")
+    patterns = ["PAYMENT RECEIVED. THANK YOU"]
+    match = _find_self_transfer_match(credit, [], patterns)
+    assert match is PENDING
+
+
+def test_self_transfer_no_pattern_returns_none():
+    """No pattern hit → returns None (caller proceeds to refund check)."""
+    credit = _credit(merchant="Amazon Mumbai", acct=AMEX_CC)
+    patterns = ["PAYMENT RECEIVED. THANK YOU"]
+    match = _find_self_transfer_match(credit, [], patterns)
+    assert match is None
+
+
+def test_self_transfer_only_same_account_debit_returns_pending():
+    """Pattern hits but the only matching-amount debit is in the same
+    account — cross-account is required. Treated as pending (wait for a
+    cross-account debit to appear)."""
+    credit = _credit(merchant="PAYMENT RECEIVED. THANK YOU", acct=AMEX_CC,
+                     amount="60000.00")
+    same_acct_debit = _debit(date(2026, 3, 14), "Something", amount="60000.00",
+                              acct=AMEX_CC)
+    patterns = ["PAYMENT RECEIVED. THANK YOU"]
+    match = _find_self_transfer_match(credit, [same_acct_debit], patterns)
+    assert match is PENDING
+
+
+def test_self_transfer_multiple_cross_account_smallest_date_delta_wins():
+    credit = _credit(merchant="PAYMENT RECEIVED. THANK YOU", acct=AMEX_CC,
+                     date_=date(2026, 3, 15), amount="60000.00")
+    far_debit = _debit(date(2026, 3, 13), "X", amount="60000.00",  # 2d back
+                       acct=UUID("10000000-0000-0000-0000-000000000001"))
+    near_debit = _debit(date(2026, 3, 14), "Y", amount="60000.00",  # 1d back
+                        acct=UUID("10000000-0000-0000-0000-000000000001"))
+    patterns = ["PAYMENT RECEIVED. THANK YOU"]
+    match = _find_self_transfer_match(credit, [far_debit, near_debit], patterns)
+    assert match.id == near_debit.id
+
+
+def test_self_transfer_cross_account_with_is_self_transfer_true_excluded():
+    """Already-flagged debits aren't re-linkable."""
+    credit = _credit(merchant="PAYMENT RECEIVED. THANK YOU", acct=AMEX_CC,
+                     amount="60000.00")
+    debit = _debit(date(2026, 3, 14), "X", amount="60000.00",
+                   acct=UUID("10000000-0000-0000-0000-000000000001"),
+                   is_self_transfer=True)
+    patterns = ["PAYMENT RECEIVED. THANK YOU"]
+    match = _find_self_transfer_match(credit, [debit], patterns)
+    assert match is PENDING

@@ -130,3 +130,58 @@ def _find_refund_match(credit: Any, candidates: list[Any]) -> Any | None:
             best = c
             best_delta = delta
     return best
+
+
+_SELF_TRANSFER_WINDOW_DAYS = 2
+
+
+class _Pending:
+    """Sentinel — pattern matched but no cross-account debit found yet.
+    Caller leaves is_self_transfer=NULL and waits for next detection run."""
+    __slots__ = ()
+    def __repr__(self) -> str:
+        return "PENDING"
+
+
+PENDING: _Pending = _Pending()
+
+
+def _find_self_transfer_match(
+    credit: Any,
+    recent_debits: list[Any],
+    patterns: list[str],
+) -> Any | _Pending | None:
+    """Return the matching cross-account debit row, PENDING (pattern hit but
+    no cross-account match yet), or None (no pattern hit — proceed to refund).
+
+    Per spec §5.2 step 1 + D3 + D4 + D6: pattern hit is REQUIRED; cross-account
+    match (different account_id, exact amount, ±2 days, is_self_transfer IS NOT
+    true) is sufficient when present. Multi-match: smallest date delta wins;
+    tie-break smallest amount delta (amount is exact so rarely fires).
+    """
+    if not _matches_self_transfer(_row_get(credit, "raw_merchant"), patterns):
+        return None
+
+    credit_account = _row_get(credit, "account_id")
+    credit_amount = _row_get(credit, "amount")
+    credit_date = _row_get(credit, "date")
+
+    best: Any | None = None
+    best_delta: int | None = None
+    for d in recent_debits:
+        if _row_get(d, "account_id") == credit_account:
+            continue
+        if _row_get(d, "amount") != credit_amount:
+            continue
+        d_date = _row_get(d, "date")
+        delta = abs((credit_date - d_date).days)
+        if delta > _SELF_TRANSFER_WINDOW_DAYS:
+            continue
+        if _row_get(d, "is_self_transfer") is True:
+            continue
+        if best is None or (best_delta is not None and delta < best_delta):
+            best = d
+            best_delta = delta
+    if best is not None:
+        return best
+    return PENDING
