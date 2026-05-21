@@ -10,9 +10,13 @@ from skills.finance.agents.review_config import ReviewConfig, load_review_config
 
 
 def test_load_defaults_from_committed_yaml():
+    """Committed defaults are the post-calibration values. confidence_threshold
+    dropped from 0.85 → 0.0 on 2026-05-21 after the 19-pair calibration showed
+    a tight-cluster confidence distribution (spec §5.0). Update this test when
+    the committed yaml changes."""
     cfg = load_review_config()
     assert isinstance(cfg, ReviewConfig)
-    assert cfg.confidence_threshold == 0.85
+    assert cfg.confidence_threshold == 0.0
     assert cfg.max_retry_rounds == 2
     assert cfg.anthropic_balance_warning_usd == 3.0
 

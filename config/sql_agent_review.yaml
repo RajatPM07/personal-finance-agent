@@ -6,7 +6,16 @@
 # Gate on `verdict == "ok"`. When confidence < this, treat as "uncertain"
 # and escalate to the strict judge. Spec §5.0 distribution plot MAY force
 # a different value — if Gemini's confidence clusters narrowly, drop to 0.0.
-confidence_threshold: 0.85
+#
+# 2026-05-21 calibration (19/20 pairs, results-20260521T070823.json): Gemini's
+# confidence values clustered tight at 0.9-1.0 (14 of 19 at 1.0). Per spec §5.0
+# table, tight-cluster distribution means numeric confidence carries no signal
+# — verdict-categorical (ok/wrong/uncertain) does all the load-bearing work.
+# Threshold dropped to 0.0 so confidence never blocks a `verdict==ok` render.
+# No behavior change in the calibration sample (all 4 escalations were verdict-
+# driven, not confidence-driven), but eliminates a brittle numeric gate from
+# the decision path going forward.
+confidence_threshold: 0.0
 
 # Maximum retry rounds when the judge returns verdict=wrong. Beyond this,
 # the question itself is the problem — surface "rephrase?" to the user.
