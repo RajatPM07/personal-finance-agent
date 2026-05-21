@@ -213,14 +213,12 @@ class DetectionResult:
     rows_pending: int = 0
 
 
-_PATTERNS_CACHE: dict[UUID, list[str]] | None = None
-
-
 def _get_patterns() -> dict[UUID, list[str]]:
-    global _PATTERNS_CACHE
-    if _PATTERNS_CACHE is None:
-        _PATTERNS_CACHE = _load_patterns()
-    return _PATTERNS_CACHE
+    """Load patterns from yaml each call. No cache — yaml load is sub-ms on a
+    small file, detection runs at most once per ingestion, and a stale cache
+    would silently ignore yaml edits (V1 single-user is expected to edit the
+    yaml to add new bank patterns)."""
+    return _load_patterns()
 
 
 def detect_for_account(
@@ -337,6 +335,11 @@ def _detect_impl(
         (account_id,) + since_params,
     )
 
+    logger.debug(
+        "refund_detector: phase A processing %d credits for account=%s since=%s",
+        len(credits), account_id, since,
+    )
+
     acct_patterns = patterns.get(account_id, [])
     for credit in credits:
         # Respect already-set flags (user overrides or prior detection runs).
@@ -379,6 +382,12 @@ def _detect_impl(
                 "UPDATE transactions SET is_self_transfer = true WHERE id = %s",
                 (st_row["id"],),
             )
+            logger.info(
+                "refund_detector: linked self_transfer cc=%s savings=%s (date_delta=%dd, amount=%s)",
+                credit["id"], st_row["id"],
+                abs((credit["date"] - st_row["date"]).days),
+                credit["amount"],
+            )
             self_transfers_linked += 1
             rows_processed += 1
             continue
@@ -386,6 +395,10 @@ def _detect_impl(
         # Refund check — skip if user already set is_refund or row was
         # previously flagged as a self-transfer.
         if already_refund or already_self_transfer:
+            logger.warning(
+                "refund_detector: skipped credit=%s — already classified (is_refund=%s, is_self_transfer=%s)",
+                credit["id"], already_refund, already_self_transfer,
+            )
             continue
 
         debit_lookup_since = credit["date"] - timedelta(days=_REFUND_WINDOW_DAYS)
@@ -409,6 +422,12 @@ def _detect_impl(
                 "UPDATE transactions SET is_refund = true, linked_txn_id = %s WHERE id = %s",
                 (refund_match["id"], credit["id"]),
             )
+            logger.info(
+                "refund_detector: linked refund credit=%s original=%s (date_delta=%dd, amount=%s)",
+                credit["id"], refund_match["id"],
+                (credit["date"] - refund_match["date"]).days,
+                credit["amount"],
+            )
             refunds_linked += 1
             rows_processed += 1
         else:
@@ -416,6 +435,10 @@ def _detect_impl(
             write(
                 "UPDATE transactions SET is_refund = false, is_self_transfer = false WHERE id = %s",
                 (credit["id"],),
+            )
+            logger.info(
+                "refund_detector: no match for credit=%s account=%s (marked processed)",
+                credit["id"], account_id,
             )
             rows_processed += 1
 
@@ -440,8 +463,9 @@ def _detect_impl(
               AND amount = %s
               AND date BETWEEN %s AND %s
               AND is_self_transfer IS NULL
+            ORDER BY ABS(date - %s::date), id
             """,
-            (account_id, debit["amount"], d_window_start, d_window_end),
+            (account_id, debit["amount"], d_window_start, d_window_end, debit["date"]),
         )
         for cand in pending_credits:
             cand_patterns = patterns.get(cand["account_id"], [])
@@ -453,6 +477,10 @@ def _detect_impl(
                 write(
                     "UPDATE transactions SET is_self_transfer = true WHERE id = %s",
                     (debit["id"],),
+                )
+                logger.info(
+                    "refund_detector: phase B unblocked self_transfer cc=%s savings=%s",
+                    cand["id"], debit["id"],
                 )
                 self_transfers_linked += 1
                 rows_processed += 1
@@ -482,8 +510,3 @@ def _exec(conn: Any, sql: str, params: tuple) -> None:
     """Execute non-returning statement."""
     with conn.cursor() as cur:
         cur.execute(sql, params)
-
-
-def _exec_fetch_psycopg(conn: Any, sql: str, params: tuple) -> list[dict]:
-    """Alias kept for clarity in the production split."""
-    return _exec_fetch(conn, sql, params)
