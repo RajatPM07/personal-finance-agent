@@ -158,6 +158,19 @@ def _find_self_transfer_match(
     match (different account_id, exact amount, ±2 days, is_self_transfer IS NOT
     true) is sufficient when present. Multi-match: smallest date delta wins;
     tie-break smallest amount delta (amount is exact so rarely fires).
+
+    Callers MUST distinguish the three return states by IDENTITY:
+        match = _find_self_transfer_match(credit, debits, patterns)
+        if match is PENDING:
+            rows_pending += 1
+        elif match is not None:
+            link_cc_credit_to_savings_debit(credit, match)
+        else:  # match is None — no pattern hit
+            proceed_to_refund_matcher(credit)
+
+    Do NOT use truthy checks. `bool(PENDING)` is True by default (intentional,
+    to surface the distinction); a naïve `if match: ...` would treat PENDING
+    as a successful match and write an incorrect link.
     """
     if not _matches_self_transfer(_row_get(credit, "raw_merchant"), patterns):
         return None

@@ -377,7 +377,7 @@ For `_find_self_transfer_match(credit, recent_debits, patterns)`:
 - Pattern hit + cross-account match → returns debit row
 - Pattern hit + no cross-account match → returns `PENDING` sentinel
 - No pattern hit → returns None
-- Pattern hit, only same-account debit found → returns None (cross-account required)
+- Pattern hit, only same-account debit found → returns PENDING (cross-account required, but a debit IS expected to exist on the OTHER account; same-account match doesn't satisfy the cross-account requirement)
 - Multiple cross-account matches → smallest date delta
 - Cross-account candidate with `is_self_transfer=true` → excluded
 
