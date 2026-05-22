@@ -190,3 +190,27 @@ Format: date → pattern → root cause → rule.
 **Captured as:** `config/sql_agent_review.yaml` threshold drop with provenance comment; this entry; memory `project_pfa_status.md` updated to reflect calibration outcomes. Spec §7 revisit trigger ("judge false-positive rate > 20% over 30 queries") is essentially already true at 67% on n=3 — but the small-n statistical caveat applies. Re-evaluate after ~30 real `/ask` queries.
 
 **Deferred follow-up:** judge prompt tuning to reduce false-positive rate. Trigger: first month of `/ask` usage shows paranoia is annoying in practice (not just on calibration set), OR scheduled monthly recalibration finds precision still <80% on a real-question sample. Don't tune blind today — without recalibration (blocked by Gemini daily quota), we'd be replacing a known-paranoid judge with an unknown one.
+
+---
+
+## 2026-05-22 — W5.1 refund + self-transfer detection shipped (backfill effectiveness bounded by cross-account coverage)
+
+**Pattern:** `is_refund` and `linked_txn_id` columns were in the schema since W2 but never populated. Briefs (W4.2 next) and `/afford` calculations would naively sum `direction='in'` as income — counting CC bill payments as income and not netting refunds against the original spend.
+
+**What W5.1 did:** post-ingestion deterministic detector (no LLM) that flags two distinct classes. Refunds: same account, exact amount, rapidfuzz token_set_ratio >= 80 on merchant, 30-day backward window. Self-transfers (CC bill payments): per-source text pattern (yaml config, keyed by account_id) + cross-account exact amount within ±2 days; both sides flagged, one-direction FK CC→savings. Inline detection at end of pipeline.ingest(), wrapped in try/except so detection bugs don't roll back ingestion. Schema migration 008 shifted is_refund from default-false to tri-state nullable so the IS NULL idempotency contract works.
+
+**Live backfill outcome (2026-05-22 against existing 1,227 rows):**
+- 57 candidate direction='in' rows processed
+- 0 refunds linked (no same-account refund pairs in current data — matcher correctly refused to fabricate)
+- 0 self-transfers linked (counterparty savings debits don't exist yet — ICICI Savings has only 7 rows covering Feb–Mar 2026; HDFC Savings is empty)
+- 43 rows processed → `is_refund=false, is_self_transfer=false` (real non-matches: Razorpay/Paytm peer transfers, fee reversals, installment plans — correctly classified)
+- 14 rows remain `is_refund IS NULL` (pending): 11 AMEX `"PAYMENT RECEIVED. THANK YOU"` + 3 ICICI CC `"BBPS Payment received"` — pattern-matched self-transfer candidates awaiting savings-statement ingestion
+
+**Rules:**
+1. When a derived/audit field is needed alongside primary facts, the default-value choice determines whether re-runs are predictable. `boolean DEFAULT false` loses the distinction between "checked, not a refund" and "never processed." Tri-state nullable (NULL = unprocessed, true/false = processed, respect user overrides) is the minimum-mechanism solution.
+2. Backfill effectiveness for cross-account detection is bounded by cross-account data coverage. A detector that correctly refuses to fabricate links will silently look "broken" when one side of the join is missing. The right operational gate is "have we ingested both sides of every counterparty?" before measuring detection rate. Document this so future engineers don't chase "the detector isn't working" when the answer is "no savings statements yet."
+3. The PENDING short-circuit (returns from self-transfer step without falling through to refund check) is a deliberate semantic choice: a pattern-matched row mid-classification shouldn't have `is_refund=false` written, which would mark it processed on a dimension still in-flight. Spec §5.2 step 1 was loose on this initially; was tightened to match implementation in commit `fb12678`.
+
+**Side finding (V1 backlog):** AMEX statement re-ingest produced apparent duplicate rows (every `PAYMENT RECEIVED. THANK YOU` and several merchant credits appear twice with same date/amount). The `import_hash` dedup probably has a gap. Surfaced during the W5.1 backfill query for sample-link validation. Not in W5.1 scope; track separately.
+
+**Captured as:** this entry; schema migration 008; spec `docs/superpowers/specs/2026-05-21-refund-detection-design.md`; plan `docs/superpowers/plans/2026-05-21-w5-1-refund-detection.md`; lib `skills/finance/categorization/refund_detector.py`.
