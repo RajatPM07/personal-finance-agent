@@ -10,6 +10,7 @@ message after this returns. Pipeline stays pure (no Telegram I/O).
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -145,4 +146,33 @@ async def ingest(
         "ingested %d rows from %s/%s (validator ok, %d total)",
         rows_added, source_meta.source, source_meta.source_ref, len(rows),
     )
-    return await _log_success(parse_result, source_meta, val, rows_added)
+    log_entry = await _log_success(parse_result, source_meta, val, rows_added)
+
+    if rows_added > 0:
+        await _run_refund_detection_safe(account_id, parse_result)
+
+    return log_entry
+
+
+async def _run_refund_detection_safe(
+    account_id: UUID, parse_result: ParseResult,
+) -> None:
+    """Inline refund + self-transfer detection. Per W5.1 spec §6.1: failures
+    here MUST NOT roll back the ingestion that's already committed.
+    AUDIT fields are derived; the next detection run picks up unprocessed rows."""
+    try:
+        from skills.finance.categorization.refund_detector import detect_for_account
+        earliest_date = min(r.txn_date for r in parse_result.insertable_rows())
+        since = earliest_date - timedelta(days=30)
+        result = await adb(detect_for_account, account_id, since)
+        logger.info(
+            "refund detection: account=%s since=%s refunds=%d self_transfers=%d "
+            "processed=%d pending=%d",
+            account_id, since, result.refunds_linked, result.self_transfers_linked,
+            result.rows_processed, result.rows_pending,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "refund detection failed for account=%s — ingestion already committed",
+            account_id,
+        )
