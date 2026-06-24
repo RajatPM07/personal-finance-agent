@@ -80,13 +80,20 @@ sql_agent_judge:
 
 sql_agent_judge_strict:
   model: anthropic/claude-sonnet-4-6
-  fallbacks: []                                 # if Sonnet fails here, reviewer surfaces "uncertain" to user
+  fallbacks: [gemini/gemini-2.5-flash]          # Gemini catches Anthropic overload/unavailable
   stakes: high
   # Escalation judge — called explicitly when Gemini returns uncertain / low-confidence.
 
 sql_agent_strict:
   model: anthropic/claude-sonnet-4-6
-  fallbacks: []                                 # last resort — surfaces "rephrase?" to user on failure
+  fallbacks: [gemini/gemini-2.5-flash]          # Gemini catches Anthropic overload/unavailable
   stakes: high
   # Last-resort SQL generation, called only after Groq retry-with-critique fails the judge.
   # Distinct from sql_agent.fallbacks so cost is observable + intentional, not implicit.
+
+sql_agent_narrator:
+  model: gemini/gemini-2.5-flash
+  fallbacks: [groq/llama-3.3-70b-versatile]
+  stakes: low
+  # Converts raw SQL result rows into a concise, conversational Telegram reply.
+  # Called after a successful render — never sees raw PII beyond what the user asked.

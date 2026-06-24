@@ -9,10 +9,10 @@ from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from skills.finance.agents.sql_agent import AgentResult, run_sql_agent
-from skills.finance.bot.document_handler import handle_document
+from skills.finance.bot.document_handler import handle_document, pop_pending_doc
 from skills.finance.lib.db import adb, service_client
 from skills.finance.lib.settings import settings
 
@@ -70,6 +70,44 @@ async def _document_handler(message: Message) -> None:
     await handle_document(message, bot=bot)
 
 
+@dp.callback_query(F.data.startswith("pickbank:"))
+async def _pickbank_callback(callback: CallbackQuery) -> None:
+    """Handles inline keyboard bank selection for unrecognised filenames."""
+    await callback.answer()  # dismiss the loading spinner
+    data = (callback.data or "").split(":", 2)
+    if len(data) != 3:
+        return
+    _, bank, token = data
+
+    if bank == "cancel":
+        if callback.message:
+            await callback.message.edit_text("Cancelled.")
+        return
+
+    pending = pop_pending_doc(token)
+    if pending is None:
+        if callback.message:
+            await callback.message.edit_text("Session expired — please resend the file.")
+        return
+
+    file_id, original_filename = pending
+
+    from pathlib import Path
+
+    from skills.finance.bot.document_handler import _canonical_name
+    from skills.finance.lib.settings import settings as s
+
+    inbox = Path(s.finance_inbox_path)
+    inbox.mkdir(parents=True, exist_ok=True)
+    canonical = inbox / _canonical_name(bank, original_filename)
+    staging = inbox / f".dl_{canonical.stem}"  # no extension — watcher skips non-.pdf/.xlsx
+    await bot.download(file_id, destination=str(staging))
+    staging.rename(canonical)
+    logger.info("pickbank: saved %s as %s", bank, canonical)
+    if callback.message:
+        await callback.message.edit_text(f"Saved as {canonical.name} — processing.")
+
+
 @dp.message(Command("model"))
 async def model_list_handler(message: Message) -> None:
     """V1 minimal /model command — only `/model list` (read-only).
@@ -101,20 +139,73 @@ async def run_sql_agent_async(question: str) -> AgentResult:
     return await asyncio.to_thread(run_sql_agent, question)
 
 
-def _render_rendered(result: AgentResult) -> str:
-    n = len(result.rows or [])
-    head = f"Answer ({n} row{'s' if n != 1 else ''}):"
-    preview_lines = []
-    for r in (result.rows or [])[:10]:
-        preview_lines.append("  " + ", ".join(f"{k}={v}" for k, v in r.items()))
-    sql_block = f"```sql\n{result.sql}\n```"
-    tags = []
-    if result.escalated:
-        tags.append("escalated to Sonnet")
-    if result.retried:
-        tags.append("retried")
-    tag_line = f"({', '.join(tags)})\n" if tags else ""
-    return f"{tag_line}{head}\n" + "\n".join(preview_lines) + f"\n\n{sql_block}"
+def _format_value(v: object) -> str:
+    """Format a single cell value — pretty-print numbers with ₹ where appropriate."""
+    from decimal import Decimal
+    if isinstance(v, int | float | Decimal):
+        n = float(v)
+        if n == int(n):
+            return f"₹{int(n):,}"
+        return f"₹{n:,.2f}"
+    return str(v) if v is not None else "—"
+
+
+def _try_fast_format(result: AgentResult) -> str | None:
+    """Return a formatted string without an LLM call for simple result shapes.
+
+    Returns None when the result is complex enough to need the narrator.
+    Handles:
+      - 1 row, 1 column  → "₹X"  (single aggregation)
+      - 1 row, 2-4 cols  → "key: value" list  (e.g. date + amount)
+      - 2-8 rows, ≤3 cols → simple table  (top-N rankings)
+    """
+    rows = result.rows or []
+    if not rows:
+        return "No transactions found for that query."
+
+    cols = list(rows[0].keys())
+
+    if len(rows) == 1:
+        if len(cols) == 1:
+            return _format_value(rows[0][cols[0]])
+        if len(cols) <= 4:
+            return "\n".join(f"{k}: {_format_value(v)}" for k, v in rows[0].items())
+
+    if 2 <= len(rows) <= 8 and len(cols) <= 3:
+        lines = []
+        for i, row in enumerate(rows, 1):
+            parts = " | ".join(_format_value(v) for v in row.values())
+            lines.append(f"{i}. {parts}")
+        return "\n".join(lines)
+
+    return None  # complex — let the narrator handle it
+
+
+def _narrate_result(question: str, result: AgentResult) -> str:
+    """Return a conversational reply. Uses a fast local formatter for simple
+    results; falls back to an LLM narrator only for complex multi-row output."""
+    fast = _try_fast_format(result)
+    if fast is not None:
+        return fast
+
+    import json
+
+    from skills.finance.lib.llm import llm as _llm
+    rows_preview = json.dumps((result.rows or [])[:20], default=str)
+    prompt = (
+        f"The user asked: {question}\n\n"
+        f"The SQL query returned these rows:\n{rows_preview}\n\n"
+        "Write a concise, conversational reply (2-4 sentences max) that directly answers "
+        "the question using the data. Use ₹ for amounts. No SQL, no technical details, "
+        "no markdown headers. Just a natural response as if you're a personal finance assistant."
+    )
+    try:
+        resp = _llm("sql_agent_narrator", prompt)
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        rows = result.rows or []
+        lines = [", ".join(f"{k}: {_format_value(v)}" for k, v in r.items()) for r in rows[:10]]
+        return "\n".join(lines) or "No data found."
 
 
 def _render_surface(result: AgentResult) -> str:
@@ -147,7 +238,8 @@ async def cmd_ask(message: Message) -> None:
         return
 
     if result.final == "rendered":
-        await message.answer(_render_rendered(result))
+        narrative = await asyncio.to_thread(_narrate_result, question, result)
+        await message.answer(narrative)
     elif result.final == "surfaced_to_user":
         await message.answer(_render_surface(result))
     elif result.final == "validator_rejected":

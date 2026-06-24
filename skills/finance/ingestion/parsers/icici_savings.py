@@ -343,6 +343,163 @@ def _assemble_rows(lines: list[str]) -> list[ParsedRow]:
     return rows
 
 
+# ── OPT format (OpTransactionHistory PDF) ────────────────────────────────────
+# Header:  "Statement of Transactions in Saving Account no. XXXX in INR..."
+# Row:     {seq}  {DD.MM.YYYY}  {amount}  {balance}  (one amount column only)
+# No Total: subtotals — direction inferred from balance delta.
+
+_OPT_HEADER_RE = re.compile(
+    r"Statement of Transactions in Saving Account",
+    re.IGNORECASE,
+)
+
+_OPT_ROW_RE = re.compile(
+    r"^(\d+)\s+(\d{2}\.\d{2}\.\d{4})\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})\s*$"
+)
+
+_OPT_PAGE_NUM_RE = re.compile(r"^\d+$")
+_OPT_CHROME_PREFIXES_UPPER = (
+    "TRANSACTION WITHDRAWAL DEPOSIT",
+    "S NO. CHEQUE NUMBER",
+    "DATE AMOUNT (INR)",
+)
+_OPT_CHROME_PREFIXES_LOWER = (
+    "www.icici",
+    "please call from",
+    "never share your",
+)
+
+
+def _is_opt_chrome(line: str) -> bool:
+    r"""Return True for OPT page-chrome lines that carry no transaction data.
+
+    Bare page numbers need a full-line match (^\d+$) to avoid false-positives
+    on UPI reference numbers. Footer lines use prefix-only matching because
+    they contain trailing text (e.g. "www.icici.bank.in Dial your Bank …").
+    """
+    s = line.strip()
+    if not s:
+        return False
+    if _OPT_PAGE_NUM_RE.match(s):
+        return True
+    u = s.upper()
+    if any(u.startswith(p) for p in _OPT_CHROME_PREFIXES_UPPER):
+        return True
+    lw = s.lower()
+    return any(lw.startswith(p) for p in _OPT_CHROME_PREFIXES_LOWER)
+
+_OPT_PARSER_VERSION = "icici-savings-opt/v1"
+
+
+def _parse_opt_date(s: str) -> date:
+    """Parse DD.MM.YYYY (dot-separated) as used in OpTransactionHistory PDFs."""
+    try:
+        return datetime.strptime(s.strip(), "%d.%m.%Y").date()
+    except ValueError as exc:
+        raise ParserError(f"Could not parse OPT date: {s!r}") from exc
+
+
+def _is_opt_format(lines: list[str]) -> bool:
+    """Return True if lines match the OpTransactionHistory PDF layout."""
+    return any(_OPT_HEADER_RE.search(line) for line in lines[:20])
+
+
+def _assemble_opt_rows(lines: list[str]) -> list[ParsedRow]:
+    """Parse the OpTransactionHistory format into ParsedRows.
+
+    Row structure per block:
+        MERCHANT_SHORT          ← truncated merchant name (line before the row)
+        {seq} DD.MM.YYYY amount balance
+        UPI/full/desc/...       ← zero or more continuation lines
+        ...
+        NEXT_MERCHANT_SHORT     ← belongs to the NEXT transaction
+
+    Direction is inferred from the balance delta vs the previous row.
+    UPI transactions are flagged is_upi_skip=True (D1 rule — Paytm is
+    source-of-truth for UPI in V1).
+    """
+    opt_positions = [i for i, raw in enumerate(lines) if _OPT_ROW_RE.match(raw.strip())]
+
+    rows: list[ParsedRow] = []
+    prev_balance: Decimal | None = None
+
+    for idx, pos in enumerate(opt_positions):
+        m = _OPT_ROW_RE.match(lines[pos].strip())
+        if not m:
+            continue  # shouldn't happen; guards the assert
+        _, date_str, amount_str, balance_str = m.groups()
+        amount = _decimal_from_indian_str(amount_str)
+        balance = _decimal_from_indian_str(balance_str)
+
+        direction: Literal["in", "out"] = (
+            "in" if prev_balance is not None and balance > prev_balance else "out"
+        )
+        prev_balance = balance
+
+        # Merchant short: last non-chrome, non-OPT line immediately before pos
+        merchant_short = ""
+        for j in range(pos - 1, max(pos - 8, -1), -1):
+            candidate = lines[j].strip()
+            if not candidate:
+                continue
+            if _is_opt_chrome(candidate):
+                continue
+            if _OPT_ROW_RE.match(candidate):
+                break
+            merchant_short = candidate
+            break
+
+        # Continuations: non-chrome lines between this row and the next
+        next_pos = opt_positions[idx + 1] if idx + 1 < len(opt_positions) else len(lines)
+        cont_lines: list[str] = []
+        for j in range(pos + 1, next_pos):
+            cont = lines[j].strip()
+            if cont and not _is_opt_chrome(cont) and not _OPT_ROW_RE.match(cont):
+                cont_lines.append(cont)
+
+        # The last cont_line before a valid next transaction is that
+        # transaction's merchant_short — exclude it from our continuations.
+        if idx + 1 < len(opt_positions) and cont_lines:
+            cont_lines = cont_lines[:-1]
+
+        parts = [p for p in [merchant_short] + cont_lines if p]
+        raw_merchant = " | ".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
+
+        is_upi = any(p.startswith("UPI/") for p in parts)
+        head = next(
+            (c for c in cont_lines if any(c.startswith(p) for p in _MODE_HEAD_PREFIXES)),
+            "",
+        )
+        inline_first = (cont_lines[0].split()[0] if cont_lines
+                        else merchant_short.split()[0] if merchant_short else "")
+        mode = "UPI" if is_upi else _detect_mode(head, inline_first)
+
+        rows.append(ParsedRow(
+            txn_date=_parse_opt_date(date_str),
+            amount=amount,
+            direction=direction,
+            raw_merchant=raw_merchant,
+            source_row_ordinal=len(rows) + 1,
+            txn_mode=mode,
+            is_upi_skip=is_upi,
+        ))
+
+    return rows
+
+
+def _derive_totals_from_rows(rows: list[ParsedRow], closing_balance: Decimal) -> dict:
+    """Compute declared_totals from parsed rows (OPT format has no Total: rows)."""
+    total_in = sum((r.amount for r in rows if r.direction == "in"), Decimal("0"))
+    total_out = sum((r.amount for r in rows if r.direction == "out"), Decimal("0"))
+    return {
+        "total_spends": total_out,
+        "total_credits": total_in,
+        "closing_balance": closing_balance,
+        "_derived_from_rows": True,
+    }
+
+
+# ── Monthly statement format ──────────────────────────────────────────────────
 # Per-page subtotal: "Total: <deposits> <withdrawals> <balance>"
 _TOTAL_ROW_RE = re.compile(
     r"^\s*Total\s*:\s*"
@@ -412,16 +569,20 @@ def _sha256_file(path: Path) -> str:
 
 
 def parse(pdf_path: Path, password: str) -> ParseResult:
-    """Decrypt the ICICI Savings PDF and extract rows + page-subtotal totals.
+    """Decrypt the ICICI Savings PDF and extract rows.
 
-    Steps:
-      1. Hash the (still-encrypted) source PDF for stable import_hash.
-      2. Decrypt to a temp file via pikepdf.
-      3. pdfplumber-extract text from every page; flatten into a list of lines.
-      4. _assemble_rows produces ParsedRows with multi-line PARTICULARS handling
-         and UPI-skip flagging.
-      5. _aggregate_totals scans the same lines for 'Total:' rows and sums
-         them across pages → declared_totals.
+    Supports two formats — detected automatically from the PDF header:
+
+    Monthly statement (existing):
+      • Date-prefixed rows (DD-MM-YYYY)
+      • Per-page "Total:" subtotals used for cross-check validation
+      • parser_version = "icici-savings-pdf/v2"
+
+    OpTransactionHistory (OPT):
+      • Header: "Statement of Transactions in Saving Account no. ..."
+      • Numbered rows: {seq}  {DD.MM.YYYY}  {amount}  {balance}
+      • No Total: rows — declared_totals derived from parsed rows
+      • parser_version = "icici-savings-opt/v1"
     """
     pdf_path = Path(pdf_path)
     pdf_content_hash = _sha256_file(pdf_path)
@@ -436,9 +597,26 @@ def parse(pdf_path: Path, password: str) -> ParseResult:
                 text = page.extract_text() or ""
                 all_lines.extend(text.splitlines())
 
+    if _is_opt_format(all_lines):
+        logger.info("icici_savings: detected OPT (Statement of Transactions) format")
+        rows = _assemble_opt_rows(all_lines)
+        # Closing balance = balance from the last OPT row in the document
+        closing_balance = Decimal("0")
+        for raw in reversed(all_lines):
+            m = _OPT_ROW_RE.match(raw.strip())
+            if m:
+                closing_balance = _decimal_from_indian_str(m.group(4))
+                break
+        declared_totals = _derive_totals_from_rows(rows, closing_balance)
+        return ParseResult(
+            rows=rows,
+            declared_totals=declared_totals,
+            pdf_content_hash=pdf_content_hash,
+            parser_version=_OPT_PARSER_VERSION,
+        )
+
     rows = _assemble_rows(all_lines)
     declared_totals = _aggregate_totals(all_lines)
-
     return ParseResult(
         rows=rows,
         declared_totals=declared_totals,

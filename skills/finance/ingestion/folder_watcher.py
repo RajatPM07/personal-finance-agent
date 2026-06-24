@@ -37,11 +37,11 @@ ACCOUNT_IDS: dict[str, UUID] = {
     "icici_savings": UUID("10000000-0000-0000-0000-000000000001"),
 }
 
-EXPECTED_EXTENSION: dict[str, str] = {
-    "icici_cc": ".pdf",
-    "amex_cc": ".xlsx",
-    "paytm_upi": ".xlsx",
-    "icici_savings": ".pdf",
+EXPECTED_EXTENSION: dict[str, set[str]] = {
+    "icici_cc": {".pdf"},
+    "amex_cc": {".xlsx", ".xls"},
+    "paytm_upi": {".xlsx", ".xls"},
+    "icici_savings": {".pdf", ".xlsx", ".xls"},
 }
 
 
@@ -64,10 +64,15 @@ async def dispatch_to_parser(
         parse_result = await asyncio.to_thread(paytm_parse, file_path)
         source = SourceMeta(source="manual_xlsx", source_ref=file_path.name)
     elif bank == "icici_savings":
-        from skills.finance.ingestion.parsers.icici_savings import parse as savings_parse
-        savings_password = await asyncio.to_thread(password_lookup, "icici_savings", "1896")
-        parse_result = await asyncio.to_thread(savings_parse, file_path, savings_password)
-        source = SourceMeta(source="manual_pdf", source_ref=file_path.name)
+        if file_path.suffix.lower() in (".xls", ".xlsx"):
+            from skills.finance.ingestion.parsers.icici_savings_xls import parse as savings_xls_parse
+            parse_result = await asyncio.to_thread(savings_xls_parse, file_path)
+            source = SourceMeta(source="manual_xlsx", source_ref=file_path.name)
+        else:
+            from skills.finance.ingestion.parsers.icici_savings import parse as savings_parse
+            savings_password = await asyncio.to_thread(password_lookup, "icici_savings", "1896")
+            parse_result = await asyncio.to_thread(savings_parse, file_path, savings_password)
+            source = SourceMeta(source="manual_pdf", source_ref=file_path.name)
     else:
         raise ValueError(f"Unknown bank: {bank}")
 
@@ -126,7 +131,7 @@ async def handle_new_file(file_path: Path) -> None:
         return
 
     ext = file_path.suffix.lower()
-    if ext not in (".pdf", ".xlsx"):
+    if ext not in (".pdf", ".xlsx", ".xls"):
         return
 
     bank = detect_bank_from_filename(name)
@@ -146,11 +151,10 @@ async def handle_new_file(file_path: Path) -> None:
         await send_alert(msg)
         return
 
-    expected_ext = EXPECTED_EXTENSION[bank]
-    if ext != expected_ext:
+    expected_exts = EXPECTED_EXTENSION[bank]
+    if ext not in expected_exts:
         msg = (
-            f"Bank '{bank}' expects {expected_ext} files in V1; got '{ext}' for '{name}'. "
-            f"ICICI = PDF, AMEX = XLSX. Rejected."
+            f"Bank '{bank}' expects {expected_exts} files; got '{ext}' for '{name}'. Rejected."
         )
         rejected = file_path.parent / f"{name}.rejected"
         await asyncio.to_thread(file_path.rename, rejected)
@@ -196,7 +200,7 @@ class _FileEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         path = Path(getattr(event, path_attr))
-        if path.suffix.lower() not in (".pdf", ".xlsx"):
+        if path.suffix.lower() not in (".pdf", ".xlsx", ".xls"):
             return
         asyncio.run_coroutine_threadsafe(self._serialized_handle(path), self.loop)
 
