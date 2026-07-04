@@ -1,6 +1,7 @@
 """Unit tests for the pure formatting/computation layer of the morning brief."""
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from skills.finance.nudging.morning_brief import (
@@ -16,8 +17,8 @@ IST = ZoneInfo("Asia/Kolkata")
 JUL_4 = datetime(2026, 7, 4, 9, 0, tzinfo=IST)
 
 
-def _base_data(**overrides: object) -> BriefData:
-    defaults: dict[str, object] = dict(
+def _base_data(**overrides: Any) -> BriefData:
+    defaults: dict[str, Any] = dict(
         now_ist=JUL_4,
         new_txns=[],
         mtd_total=Decimal("38400"),
@@ -28,16 +29,7 @@ def _base_data(**overrides: object) -> BriefData:
         top_category_avg=Decimal("22575"),
     )
     defaults.update(overrides)
-    return BriefData(
-        now_ist=defaults["now_ist"],  # type: ignore[arg-type]
-        new_txns=defaults["new_txns"],  # type: ignore[arg-type]
-        mtd_total=defaults["mtd_total"],  # type: ignore[arg-type]
-        monthly_avg=defaults["monthly_avg"],  # type: ignore[arg-type]
-        months_of_history=defaults["months_of_history"],  # type: ignore[arg-type]
-        top_category=defaults["top_category"],  # type: ignore[arg-type]
-        top_category_mtd=defaults["top_category_mtd"],  # type: ignore[arg-type]
-        top_category_avg=defaults["top_category_avg"],  # type: ignore[arg-type]
-    )
+    return BriefData(**defaults)
 
 
 class TestInr:
@@ -125,6 +117,15 @@ class TestFormatBriefNewTxns:
         ])
         assert "• Mystery Shop ₹500 · Needs Review" in format_brief(data)
 
+    def test_new_txns_with_zero_mtd_omits_pacing_suffix(self) -> None:
+        data = _base_data(
+            mtd_total=Decimal("0"),
+            new_txns=[NewTxn(merchant="Swiggy", amount=Decimal("640"), category="Food Delivery")],
+        )
+        text = format_brief(data)
+        assert "vs avg pace" not in text
+        assert "-100%" not in text
+
 
 class TestFormatBriefPacing:
     def test_pacing_variant_when_no_new_txns(self) -> None:
@@ -147,4 +148,10 @@ class TestFormatBriefPacing:
         text = format_brief(_base_data(top_category=None,
                                        top_category_mtd=Decimal("0"),
                                        top_category_avg=Decimal("0")))
+        assert "Top mover" not in text
+
+    def test_zero_mtd_shows_nothing_recorded(self) -> None:
+        text = format_brief(_base_data(mtd_total=Decimal("0")))
+        assert "₹0 — nothing recorded yet" in text
+        assert "-100%" not in text
         assert "Top mover" not in text

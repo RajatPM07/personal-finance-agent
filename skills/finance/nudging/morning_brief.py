@@ -108,23 +108,26 @@ def format_brief(data: BriefData) -> str:
         if overflow > 0:
             lines.append(f"  +{overflow} more")
         lines.append("")
-        if pct is None:
+        if pct is None or data.mtd_total <= 0:
             lines.append(f"{month_name} so far: {_inr(data.mtd_total)}")
         else:
             lines.append(
                 f"{month_name} so far: {_inr(data.mtd_total)} ({pct:+.0f}% vs avg pace)"
             )
     else:
-        lines.append(f"{month_name} so far: {_inr(data.mtd_total)}")
-        if pct is None:
-            lines.append("Pacing: no baseline yet")
+        if data.mtd_total <= 0:
+            lines.append(f"{month_name} so far: ₹0 — nothing recorded yet")
         else:
-            lines.append(f"Pacing {pct:+.0f}% vs 6-mo avg")
-        if data.top_category is not None:
-            lines.append(
-                f"Top mover: {data.top_category} {_inr(data.top_category_mtd)} "
-                f"(avg {_inr(data.top_category_avg)})"
-            )
+            lines.append(f"{month_name} so far: {_inr(data.mtd_total)}")
+            if pct is None:
+                lines.append("Pacing: no baseline yet")
+            else:
+                lines.append(f"Pacing {pct:+.0f}% vs 6-mo avg")
+            if data.top_category is not None:
+                lines.append(
+                    f"Top mover: {data.top_category} {_inr(data.top_category_mtd)} "
+                    f"(avg {_inr(data.top_category_avg)})"
+                )
     return "\n".join(lines)
 
 
