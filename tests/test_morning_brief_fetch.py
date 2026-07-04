@@ -74,6 +74,15 @@ class TestFetchBriefData:
         assert data.new_txns[0].category is None
 
 
+def test_new_txns_sql_excludes_money_movement():
+    """Guard: the new-txns list must never headline CC bill payments as spend.
+    NOTE: psycopg3 requires != ALL(%(excluded)s::text[]) instead of NOT IN %(excluded)s
+    because Python lists adapt as PostgreSQL arrays, not SQL IN-list literals.
+    """
+    assert "is_self_transfer IS NOT TRUE" in mb._NEW_TXNS_SQL
+    assert "!= ALL(%(excluded)s::text[])" in mb._NEW_TXNS_SQL
+
+
 class TestWatermark:
     @pytest.mark.asyncio
     async def test_get_watermark_returns_stored_ts(self, monkeypatch):

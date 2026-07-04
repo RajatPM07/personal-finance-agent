@@ -12,16 +12,22 @@ layered below.
 """
 from __future__ import annotations
 
+import asyncio
 import calendar
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from skills.finance.ingestion._common import RAJAT_USER_ID
 from skills.finance.lib.db import adb, readonly_client, service_client
+from skills.finance.lib.settings import settings
+from skills.finance.monitoring.alerts import send_alert
+
+if TYPE_CHECKING:
+    from aiogram import Bot
 
 MAX_TXN_LINES = 5
 
@@ -131,7 +137,9 @@ WATERMARK_KEY = "morning_brief_last_run"
 
 # Money movement, not spend. Loan Repayment excluded because the May 2026
 # ₹8L prepayment would poison every monthly average.
-_EXCLUDED_CATEGORIES = ("Self Transfer", "Wallet Load", "Loan Repayment")
+# List (not tuple): psycopg3 adapts Python lists as PostgreSQL text[] arrays,
+# enabling the != ALL(%(excluded)s::text[]) pattern below.
+_EXCLUDED_CATEGORIES = ["Self Transfer", "Wallet Load", "Loan Repayment"]
 
 _NEW_TXNS_SQL = """
     SELECT t.raw_merchant, t.amount, c.name
@@ -139,6 +147,8 @@ _NEW_TXNS_SQL = """
     LEFT JOIN categories c ON c.id = t.category_id
     WHERE t.direction = 'out' AND t.is_deleted = false
       AND t.ingested_at > %(watermark)s
+      AND t.is_self_transfer IS NOT TRUE
+      AND (c.name IS NULL OR c.name != ALL(%(excluded)s::text[]))
     ORDER BY t.amount DESC
 """
 
@@ -148,7 +158,7 @@ _MTD_TOTAL_SQL = """
     LEFT JOIN categories c ON c.id = t.category_id
     WHERE t.direction = 'out' AND t.is_deleted = false
       AND t.date >= %(month_start)s AND t.date <= %(today)s
-      AND (c.name IS NULL OR c.name NOT IN %(excluded)s)
+      AND (c.name IS NULL OR c.name != ALL(%(excluded)s::text[]))
 """
 
 _MONTHLY_TOTALS_SQL = """
@@ -157,7 +167,7 @@ _MONTHLY_TOTALS_SQL = """
     LEFT JOIN categories c ON c.id = t.category_id
     WHERE t.direction = 'out' AND t.is_deleted = false
       AND t.date >= %(history_start)s AND t.date < %(month_start)s
-      AND (c.name IS NULL OR c.name NOT IN %(excluded)s)
+      AND (c.name IS NULL OR c.name != ALL(%(excluded)s::text[]))
     GROUP BY 1
 """
 
@@ -167,7 +177,7 @@ _MTD_BY_CAT_SQL = """
     JOIN categories c ON c.id = t.category_id
     WHERE t.direction = 'out' AND t.is_deleted = false
       AND t.date >= %(month_start)s AND t.date <= %(today)s
-      AND c.name NOT IN %(excluded)s
+      AND c.name != ALL(%(excluded)s::text[])
     GROUP BY 1
 """
 
@@ -179,7 +189,7 @@ _CAT_MONTHLY_AVG_SQL = """
         JOIN categories c ON c.id = t.category_id
         WHERE t.direction = 'out' AND t.is_deleted = false
           AND t.date >= %(history_start)s AND t.date < %(month_start)s
-          AND c.name NOT IN %(excluded)s
+          AND c.name != ALL(%(excluded)s::text[])
         GROUP BY 1, 2
     ) m GROUP BY name
 """
@@ -275,3 +285,33 @@ async def set_watermark(ts_utc: datetime) -> None:
         .upsert(payload, on_conflict="user_id,key")
         .execute()
     )
+
+
+# --- Scheduler job ------------------------------------------------------------
+
+
+async def send_morning_brief_job(bot: Bot) -> None:
+    """09:00 IST daily. Failures alert via the secondary bot and never raise
+    (an unhandled exception here would silently kill future runs' logging).
+
+    Deliberately NO heartbeat-table write: check_stale_components_job flags
+    anything >30 min old, which a daily component would trip perpetually.
+    Failure alerting is direct via send_alert instead.
+    """
+    try:
+        watermark = await get_watermark()
+        generated_at = datetime.now(tz=UTC)
+        data = await asyncio.to_thread(fetch_brief_data, watermark)
+        text = format_brief(data)
+        await bot.send_message(settings.telegram_chat_id_rajat, text)
+        await set_watermark(generated_at)
+        logger.info(
+            "morning brief sent: new_txns=%d mtd_total=%s",
+            len(data.new_txns), data.mtd_total,
+        )
+    except Exception as e:  # noqa: BLE001 — job must never raise into APScheduler
+        logger.exception("morning brief failed")
+        try:
+            await send_alert(f"Morning brief failed: {type(e).__name__}: {e}")
+        except Exception:  # noqa: BLE001
+            logger.exception("morning brief failure alert also failed")
