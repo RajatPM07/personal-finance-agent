@@ -817,6 +817,36 @@ async def send_morning_brief_job(bot: Bot) -> None:
             logger.exception("morning brief failure alert also failed")
 ```
 
+- [ ] **Step 3b: Amendment A1 — exclude money-movement rows from the new-txns list**
+
+Judge finding after Task 2: `_NEW_TXNS_SQL` lists every outflow ingested since the watermark, so a CC bill auto-debit (Self Transfer) would headline the brief as spend. Replace the `_NEW_TXNS_SQL` constant in `skills/finance/nudging/morning_brief.py` with:
+
+```python
+_NEW_TXNS_SQL = """
+    SELECT t.raw_merchant, t.amount, c.name
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    WHERE t.direction = 'out' AND t.is_deleted = false
+      AND t.ingested_at > %(watermark)s
+      AND t.is_self_transfer IS NOT TRUE
+      AND (c.name IS NULL OR c.name NOT IN %(excluded)s)
+    ORDER BY t.amount DESC
+"""
+```
+
+(`is_self_transfer` is tri-state per migration 008 — `IS NOT TRUE` keeps NULL/unprocessed rows visible; the category filter catches rows the batch audit already categorized as transfers.)
+
+Add to `tests/test_morning_brief_fetch.py`:
+
+```python
+def test_new_txns_sql_excludes_money_movement():
+    """Guard: the new-txns list must never headline CC bill payments as spend."""
+    assert "is_self_transfer IS NOT TRUE" in mb._NEW_TXNS_SQL
+    assert "NOT IN %(excluded)s" in mb._NEW_TXNS_SQL
+```
+
+Run: `.venv/bin/python -m pytest tests/test_morning_brief_fetch.py -v` → all PASS.
+
 - [ ] **Step 4: Wire into app.py**
 
 In `app.py`, inside `_build_scheduler()` after the `anthropic_balance_check` block, add:
