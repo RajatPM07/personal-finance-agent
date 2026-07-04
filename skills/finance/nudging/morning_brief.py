@@ -13,9 +13,15 @@ layered below.
 from __future__ import annotations
 
 import calendar
+import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from skills.finance.ingestion._common import RAJAT_USER_ID
+from skills.finance.lib.db import adb, readonly_client, service_client
 
 MAX_TXN_LINES = 5
 
@@ -114,3 +120,158 @@ def format_brief(data: BriefData) -> str:
                 f"(avg {_inr(data.top_category_avg)})"
             )
     return "\n".join(lines)
+
+
+# --- Data-fetch layer (sync — callers wrap in asyncio.to_thread) ------------
+
+logger = logging.getLogger(__name__)
+
+IST = ZoneInfo("Asia/Kolkata")
+WATERMARK_KEY = "morning_brief_last_run"
+
+# Money movement, not spend. Loan Repayment excluded because the May 2026
+# ₹8L prepayment would poison every monthly average.
+_EXCLUDED_CATEGORIES = ("Self Transfer", "Wallet Load", "Loan Repayment")
+
+_NEW_TXNS_SQL = """
+    SELECT t.raw_merchant, t.amount, c.name
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    WHERE t.direction = 'out' AND t.is_deleted = false
+      AND t.ingested_at > %(watermark)s
+    ORDER BY t.amount DESC
+"""
+
+_MTD_TOTAL_SQL = """
+    SELECT COALESCE(SUM(t.amount), 0)
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    WHERE t.direction = 'out' AND t.is_deleted = false
+      AND t.date >= %(month_start)s AND t.date <= %(today)s
+      AND (c.name IS NULL OR c.name NOT IN %(excluded)s)
+"""
+
+_MONTHLY_TOTALS_SQL = """
+    SELECT date_trunc('month', t.date) AS mth, SUM(t.amount) AS total
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    WHERE t.direction = 'out' AND t.is_deleted = false
+      AND t.date >= %(history_start)s AND t.date < %(month_start)s
+      AND (c.name IS NULL OR c.name NOT IN %(excluded)s)
+    GROUP BY 1
+"""
+
+_MTD_BY_CAT_SQL = """
+    SELECT c.name, SUM(t.amount)
+    FROM transactions t
+    JOIN categories c ON c.id = t.category_id
+    WHERE t.direction = 'out' AND t.is_deleted = false
+      AND t.date >= %(month_start)s AND t.date <= %(today)s
+      AND c.name NOT IN %(excluded)s
+    GROUP BY 1
+"""
+
+_CAT_MONTHLY_AVG_SQL = """
+    SELECT name, AVG(total) FROM (
+        SELECT c.name AS name, date_trunc('month', t.date) AS mth,
+               SUM(t.amount) AS total
+        FROM transactions t
+        JOIN categories c ON c.id = t.category_id
+        WHERE t.direction = 'out' AND t.is_deleted = false
+          AND t.date >= %(history_start)s AND t.date < %(month_start)s
+          AND c.name NOT IN %(excluded)s
+        GROUP BY 1, 2
+    ) m GROUP BY name
+"""
+
+
+def _rows(conn: Any, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]:
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def fetch_brief_data(watermark_utc: datetime) -> BriefData:
+    """Assemble BriefData with 5 read-only queries. SYNC — wrap in to_thread."""
+    now_ist = datetime.now(tz=IST)
+    today = now_ist.date()
+    month_start = today.replace(day=1)
+    # 6 full calendar months of history before the current month
+    history_start = (month_start - timedelta(days=1)).replace(day=1)
+    for _ in range(5):
+        history_start = (history_start - timedelta(days=1)).replace(day=1)
+
+    conn = readonly_client()
+    params: dict[str, Any] = {
+        "watermark": watermark_utc,
+        "month_start": month_start,
+        "today": today,
+        "history_start": history_start,
+        "excluded": _EXCLUDED_CATEGORIES,
+    }
+
+    txn_rows = _rows(conn, _NEW_TXNS_SQL, params)
+    new_txns = [
+        NewTxn(merchant=m or "Unknown", amount=Decimal(a), category=c)
+        for (m, a, c) in txn_rows
+    ]
+
+    mtd_row = _rows(conn, _MTD_TOTAL_SQL, params)
+    mtd_total = Decimal(mtd_row[0][0]) if mtd_row and mtd_row[0][0] is not None else Decimal(0)
+
+    monthly_rows = _rows(conn, _MONTHLY_TOTALS_SQL, params)
+    months = len(monthly_rows)
+    monthly_avg = (
+        sum((Decimal(t) for (_, t) in monthly_rows), Decimal(0)) / months
+        if months else Decimal(0)
+    )
+
+    mtd_by_cat = {name: Decimal(total) for (name, total) in _rows(conn, _MTD_BY_CAT_SQL, params)}
+    avg_by_cat = {name: Decimal(avg) for (name, avg) in _rows(conn, _CAT_MONTHLY_AVG_SQL, params)}
+
+    day = now_ist.day
+    dim = calendar.monthrange(now_ist.year, now_ist.month)[1]
+    mover = top_mover(mtd_by_cat, avg_by_cat, day, dim)
+
+    return BriefData(
+        now_ist=now_ist,
+        new_txns=new_txns,
+        mtd_total=mtd_total,
+        monthly_avg=monthly_avg,
+        months_of_history=months,
+        top_category=mover[0] if mover else None,
+        top_category_mtd=mover[1] if mover else Decimal(0),
+        top_category_avg=mover[2] if mover else Decimal(0),
+    )
+
+
+# --- Watermark (agent_memory) ------------------------------------------------
+
+
+async def get_watermark() -> datetime:
+    """Last successful brief send (UTC). Missing → 24h ago (first run)."""
+    resp = await adb(
+        lambda: service_client()
+        .table("agent_memory")
+        .select("value")
+        .eq("user_id", RAJAT_USER_ID)
+        .eq("key", WATERMARK_KEY)
+        .execute()
+    )
+    if resp.data:
+        return datetime.fromisoformat(resp.data[0]["value"]["ts"])
+    return datetime.now(tz=UTC) - timedelta(hours=24)
+
+
+async def set_watermark(ts_utc: datetime) -> None:
+    payload: dict[str, Any] = {
+        "user_id": RAJAT_USER_ID,
+        "key": WATERMARK_KEY,
+        "value": {"ts": ts_utc.isoformat()},
+    }
+    await adb(
+        lambda: service_client()
+        .table("agent_memory")
+        .upsert(payload, on_conflict="user_id,key")
+        .execute()
+    )
