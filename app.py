@@ -83,6 +83,17 @@ def _build_scheduler() -> AsyncIOScheduler:
     )
     logger.info("scheduled daily anthropic balance check at 09:00 Asia/Kolkata")
 
+    # Daily adaptive morning brief at 09:00 IST (plan 2026-07-04-daily-morning-brief).
+    from skills.finance.nudging.morning_brief import send_morning_brief_job
+    sched.add_job(
+        send_morning_brief_job,
+        CronTrigger(hour=9, minute=0, timezone="Asia/Kolkata"),
+        id="morning_brief",
+        args=[bot],
+        replace_existing=True,
+    )
+    logger.info("scheduled daily morning brief at 09:00 Asia/Kolkata")
+
     return sched
 
 

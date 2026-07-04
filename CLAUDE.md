@@ -23,6 +23,7 @@ See `PRD.md` for scope; `tasks/todo.md` for current plan; `tasks/lessons.md` for
 - `skills/finance/bot/` — aiogram + heartbeat middleware + /ask command (W4.1)
 - `skills/finance/agents/` — W4.1 SQL agent: `sql_agent.py` (orchestrator), `judge.py` (prompt builder/parser), `sql_validator.py` (sqlglot static validation), `review_config.py` (tunable thresholds)
 - `skills/finance/monitoring/` — async alerts (+ Anthropic balance check), heartbeat jobs, `/health`
+- `skills/finance/nudging/morning_brief.py` — daily 09:00 IST adaptive brief (new txns else MTD pacing); watermark in agent_memory
 - `skills/finance/ingestion/parsers/<bank>_parser.py` — each exports `__parser_version__`
 - `scripts/backup_supabase.py` — standalone, launchd-invoked
 - `migrations/` — `001_init`, `002_verify_readonly`, `003_seed`; `*.local.sql` gitignored for real secrets/PII
