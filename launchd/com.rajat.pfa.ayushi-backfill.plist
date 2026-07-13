@@ -21,6 +21,8 @@
         <key>Hour</key><integer>4</integer>
         <key>Minute</key><integer>0</integer>
     </dict>
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>/Users/rajat/finance-logs/ayushi-backfill.stdout.log</string>
     <key>StandardErrorPath</key>

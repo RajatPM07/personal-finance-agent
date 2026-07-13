@@ -49,3 +49,28 @@ def test_accepts_explicit_join_with_user_scope():
     )
     r = validate_sql(sql, TABLES, require_user_id=UID)
     assert r.ok
+
+
+def test_rejects_constant_only_join_on():
+    # `JOIN accounts a ON a.user_id = '<caller>'` puts the user filter in the
+    # ON clause with no column=column link, so `transactions t` is left
+    # unfiltered and every user's rows leak -- a disguised cross-join that
+    # must be rejected even though the caller UUID is present.
+    sql = (
+        "SELECT t.amount FROM transactions t "
+        f"JOIN accounts a ON a.user_id = '{UID}'"
+    )
+    r = validate_sql(sql, TABLES, require_user_id=UID)
+    assert not r.ok
+    assert "cross-join" in r.reason.lower() or "column equality" in r.reason.lower()
+
+
+def test_accepts_join_with_link_and_extra_predicate():
+    # A real column link plus an extra user_id predicate in the ON is fine.
+    sql = (
+        "SELECT t.amount FROM transactions t "
+        f"JOIN accounts a ON a.id = t.account_id AND a.user_id = '{UID}' "
+        f"WHERE t.user_id = '{UID}'"
+    )
+    r = validate_sql(sql, TABLES, require_user_id=UID)
+    assert r.ok

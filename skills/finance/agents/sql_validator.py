@@ -96,7 +96,9 @@ def validate_sql(
         # `JOIN ... ON`/`USING` is fine because it structurally ties the
         # unfiltered table's rows to the filtered one via the join key.
         for join in stmt.find_all(exp.Join):
-            if join.args.get("on") is None and not join.args.get("using"):
+            on = join.args.get("on")
+            using = join.args.get("using")
+            if on is None and not using:
                 return ValidationResult(
                     ok=False,
                     reason=(
@@ -105,6 +107,28 @@ def validate_sql(
                     ),
                     statement_type="select",
                 )
+            # A `USING(col)` clause structurally links both tables. An `ON`
+            # clause must contain at least one column=column equality that
+            # ties the joined tables together. An ON of only column=literal
+            # predicates (e.g. `ON a.user_id = '<caller>'`) is a disguised
+            # cross-join: it leaves the other table unfiltered and leaks
+            # every user's rows, exactly like a comma cross-join.
+            if on is not None and not using:
+                has_column_link = any(
+                    isinstance(eq.this, exp.Column)
+                    and isinstance(eq.expression, exp.Column)
+                    for eq in on.find_all(exp.EQ)
+                )
+                if not has_column_link:
+                    return ValidationResult(
+                        ok=False,
+                        reason=(
+                            "join ON must link the tables by a column equality "
+                            "(e.g. ON a.id = t.account_id); a constant-only ON "
+                            "is a disguised cross-join"
+                        ),
+                        statement_type="select",
+                    )
 
         # Collect all string literals that appear in a `user_id = <literal>`
         # comparison. The caller's UUID must be present, and no *other*

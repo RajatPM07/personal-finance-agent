@@ -660,7 +660,7 @@ def parse(pdf_path: Path, password: str) -> ParseResult:
 
 **Interfaces:** Consumes existing `icici_cc.parse(path, password)`. No production change.
 
-- [ ] **Step 1:** Copy two representative statements (one per card) to gitignored fixtures. Her monthlies are password-protected — determine the password (likely DOB/name-based; confirm with Rajat) and add `credentials.yaml` entries `icici_cc_6007` / `icici_cc_4009` if live routing is later wanted. For the test, pass the password directly.
+- [ ] **Step 1:** Copy two representative statements (one per card) to gitignored fixtures. **Her monthlies are NOT password-protected** (confirmed with Rajat + verified: `pikepdf` reports `encrypted=False`), so call `parse(path, password="")` — no `credentials.yaml` entry needed for the CCs.
 
 - [ ] **Step 2: Write the test** `tests/test_icici_cc_ayushi.py` — assert the *existing* parser produces well-formed rows, contiguous ordinals, and non-empty merchants on her statements (mirrors `test_icici_cc_parser.py`, different fixture + password). Include an assertion that a known credit row (`INFINITY PAYMENT RECEIVED` / `BBPS Payment received`) is `direction == "in"`.
 

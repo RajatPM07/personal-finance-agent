@@ -79,6 +79,10 @@ async def _document_handler(message: Message) -> None:
 @dp.callback_query(F.data.startswith("pickbank:"))
 async def _pickbank_callback(callback: CallbackQuery) -> None:
     """Handles inline keyboard bank selection for unrecognised filenames."""
+    # Whitelist gate (CLAUDE.md invariant #7): this handler downloads a file
+    # into the ingestion inbox, so it must reject non-whitelisted senders.
+    if callback.from_user is None or user_id_for_chat(callback.from_user.id) is None:
+        return
     await callback.answer()  # dismiss the loading spinner
     data = (callback.data or "").split(":", 2)
     if len(data) != 3:
