@@ -33,6 +33,7 @@ def _build_insert_row(
     account_id: UUID,
     pr: ParseResult,
     source: SourceMeta,
+    user_id: str = RAJAT_USER_ID,
 ) -> dict[str, Any]:
     # normalized_description = raw_merchant in Week 2; merchant normalization
     # lands in Week 5 with a parser_version bump that forces re-ingest of
@@ -47,7 +48,7 @@ def _build_insert_row(
         parser_version=pr.parser_version,
     )
     return {
-        "user_id": RAJAT_USER_ID,
+        "user_id": user_id,
         "account_id": str(account_id),
         "date": r.txn_date.isoformat(),
         "amount": str(r.amount),
@@ -116,6 +117,7 @@ async def ingest(
     parse_result: ParseResult,
     account_id: UUID,
     source_meta: SourceMeta,
+    user_id: str = RAJAT_USER_ID,
 ) -> dict[str, Any]:
     """Orchestrate validate → upsert → log. Returns the ingestion_log row.
 
@@ -131,7 +133,7 @@ async def ingest(
         return await _log_validation_failure(parse_result, source_meta, val)
 
     rows = [
-        _build_insert_row(r, account_id, parse_result, source_meta)
+        _build_insert_row(r, account_id, parse_result, source_meta, user_id)
         for r in parse_result.insertable_rows()
     ]
 
