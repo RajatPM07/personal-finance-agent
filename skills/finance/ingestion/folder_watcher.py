@@ -25,6 +25,7 @@ from skills.finance.ingestion._common import (
 )
 from skills.finance.ingestion.pipeline import ingest
 from skills.finance.lib.settings import settings
+from skills.finance.lib.users import AYUSHI_USER_ID, RAJAT_USER_ID
 from skills.finance.monitoring.alerts import send_alert
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,17 @@ ACCOUNT_IDS: dict[str, UUID] = {
     "amex_cc": UUID("10000000-0000-0000-0000-000000000005"),
     "paytm_upi": UUID("10000000-0000-0000-0000-000000000006"),
     "icici_savings": UUID("10000000-0000-0000-0000-000000000001"),
+    "phonepe_upi": UUID("20000000-0000-0000-0000-000000000003"),
+}
+
+# Account owner (DB user_id) per bank. Default is Rajat; PhonePe is Ayushi's
+# UPI source-of-truth account (she has no Paytm).
+ACCOUNT_OWNERS: dict[str, str] = {
+    "icici_cc": RAJAT_USER_ID,
+    "amex_cc": RAJAT_USER_ID,
+    "paytm_upi": RAJAT_USER_ID,
+    "icici_savings": RAJAT_USER_ID,
+    "phonepe_upi": AYUSHI_USER_ID,
 }
 
 EXPECTED_EXTENSION: dict[str, set[str]] = {
@@ -42,6 +54,7 @@ EXPECTED_EXTENSION: dict[str, set[str]] = {
     "amex_cc": {".xlsx", ".xls"},
     "paytm_upi": {".xlsx", ".xls"},
     "icici_savings": {".pdf", ".xlsx", ".xls"},
+    "phonepe_upi": {".pdf"},
 }
 
 
@@ -73,11 +86,16 @@ async def dispatch_to_parser(
             savings_password = await asyncio.to_thread(password_lookup, "icici_savings", "1896")
             parse_result = await asyncio.to_thread(savings_parse, file_path, savings_password)
             source = SourceMeta(source="manual_pdf", source_ref=file_path.name)
+    elif bank == "phonepe_upi":
+        from skills.finance.ingestion.parsers.phonepe_upi import parse as phonepe_parse
+        phonepe_password = await asyncio.to_thread(password_lookup, "phonepe_upi", "XXXX15")
+        parse_result = await asyncio.to_thread(phonepe_parse, file_path, phonepe_password)
+        source = SourceMeta(source="manual_pdf", source_ref=file_path.name)
     else:
         raise ValueError(f"Unknown bank: {bank}")
 
     account_id = ACCOUNT_IDS[bank]
-    log_entry = await ingest(parse_result, account_id, source)
+    log_entry = await ingest(parse_result, account_id, source, user_id=ACCOUNT_OWNERS.get(bank, RAJAT_USER_ID))
     await _send_summary(bank, file_path.name, log_entry, parse_result)
 
 

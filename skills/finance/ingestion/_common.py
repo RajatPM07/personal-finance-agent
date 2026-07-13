@@ -19,7 +19,7 @@ import yaml
 # V2 onboarding will move this to settings.py when Ayushi is added.
 RAJAT_USER_ID: str = "00000000-0000-0000-0000-000000000001"
 
-Bank = Literal["icici_cc", "amex_cc", "paytm_upi", "icici_savings"]
+Bank = Literal["icici_cc", "amex_cc", "paytm_upi", "icici_savings", "phonepe_upi"]
 
 
 class AmbiguousCredentialError(Exception):
@@ -108,6 +108,7 @@ def detect_bank_from_filename(filename: str) -> Bank | None:
       'icici_savings'   if filename has 'icici' AND ('savings' OR 'sav') (no 'cc').
       'amex_cc'         if filename has 'amex' OR 'american' tokens.
       'paytm_upi'       if filename has 'paytm' token.
+      'phonepe_upi'     if filename has 'phonepe' token.
       None              if multiple bank-family tokens collide (ambiguous), or no
                         family matches, or 'icici' appears without a disambiguator.
     """
@@ -116,11 +117,12 @@ def detect_bank_from_filename(filename: str) -> Bank | None:
     has_icici = "icici" in tokens
     has_amex = ("amex" in tokens) or ("american" in tokens)
     has_paytm = "paytm" in tokens
+    has_phonepe = "phonepe" in tokens
     has_savings = ("savings" in tokens) or ("sav" in tokens)
     has_cc = "cc" in tokens
 
     # Multi-family ambiguity check (e.g., paytm + amex)
-    if sum([has_icici, has_amex, has_paytm]) > 1:
+    if sum([has_icici, has_amex, has_paytm, has_phonepe]) > 1:
         return None
 
     if has_icici:
@@ -137,6 +139,8 @@ def detect_bank_from_filename(filename: str) -> Bank | None:
         return "amex_cc"
     if has_paytm:
         return "paytm_upi"
+    if has_phonepe:
+        return "phonepe_upi"
     return None
 
 
