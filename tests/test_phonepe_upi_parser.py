@@ -44,3 +44,15 @@ def test_large_overflow_amount_captured():
 def test_credit_row_direction_in():
     r = parse(FIXTURE, PASSWORD)
     assert any(row.direction == "in" for row in r.rows)   # "Received from …" rows
+
+
+def test_raw_merchant_prefix_stripped():
+    # raw_merchant should be just the counterparty/merchant, not the leading
+    # transaction-type phrase (consistency with paytm_upi.py convention —
+    # matters because raw_merchant feeds import_hash).
+    r = parse(FIXTURE, PASSWORD)
+    for row in r.rows:
+        assert not row.raw_merchant.startswith("Paid to ")
+        assert not row.raw_merchant.startswith("Received from ")
+        assert not row.raw_merchant.startswith("Paid - ")
+    assert any(row.raw_merchant == "RAJAT SHARMA" for row in r.rows)

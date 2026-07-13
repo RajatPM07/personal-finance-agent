@@ -60,6 +60,23 @@ def _amount(s: str) -> Decimal:
     return Decimal(s.replace(",", ""))
 
 
+# Leading transaction-type phrases to strip from the details capture so
+# raw_merchant is just the counterparty/merchant (consistency with
+# paytm_upi.py's _strip_prefix convention — matters because raw_merchant
+# feeds import_hash).
+_COUNTERPARTY_PREFIXES = ("Paid to ", "Received from ", "Paid - ")
+
+
+def _strip_counterparty_prefix(details: str) -> str:
+    """Strip a leading 'Paid to '/'Received from '/'Paid - ' phrase from the
+    details string. Returns the input unchanged if none matches (some rows
+    may already be bare)."""
+    for prefix in _COUNTERPARTY_PREFIXES:
+        if details.startswith(prefix):
+            return details[len(prefix):].strip()
+    return details
+
+
 def parse(pdf_path: Path, password: str) -> ParseResult:
     pdf_path = Path(pdf_path)
     file_hash = _sha256_file(pdf_path)
@@ -102,7 +119,7 @@ def parse(pdf_path: Path, password: str) -> ParseResult:
             txn_date=txn_date,
             amount=amount,
             direction=direction,  # type: ignore[arg-type]
-            raw_merchant=m.group("details").strip(),
+            raw_merchant=_strip_counterparty_prefix(m.group("details").strip()),
             source_row_ordinal=ordinal,
         ))
         if direction == "out":
