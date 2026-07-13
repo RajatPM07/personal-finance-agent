@@ -15,6 +15,7 @@ from skills.finance.agents.sql_agent import AgentResult, run_sql_agent
 from skills.finance.bot.document_handler import handle_document, pop_pending_doc
 from skills.finance.lib.db import adb, service_client
 from skills.finance.lib.settings import settings
+from skills.finance.lib.users import user_id_for_chat
 
 ROUTING_YAML_PATH = Path("config/model_routing.yaml")
 
@@ -54,19 +55,24 @@ class BotHeartbeatMiddleware(BaseMiddleware):
 dp.message.middleware(BotHeartbeatMiddleware())
 
 
-def _is_rajat(message: Message) -> bool:
-    return str(message.chat.id) == str(settings.telegram_chat_id_rajat)
+def _authorized_user_id(message: Message) -> str | None:
+    """Return the sender's DB user_id, or None if not whitelisted."""
+    return user_id_for_chat(message.chat.id)
 
 
 @dp.message(Command("ping"))
 async def ping(message: Message) -> None:
-    if not _is_rajat(message):
+    uid = _authorized_user_id(message)
+    if uid is None:
         return
     await message.answer("pong")
 
 
 @dp.message(F.document)
 async def _document_handler(message: Message) -> None:
+    uid = _authorized_user_id(message)
+    if uid is None:
+        return
     await handle_document(message, bot=bot)
 
 
@@ -112,7 +118,8 @@ async def _pickbank_callback(callback: CallbackQuery) -> None:
 async def model_list_handler(message: Message) -> None:
     """V1 minimal /model command — only `/model list` (read-only).
     Full /model family (switch, --confirm, A/B mode) deferred to Week 4."""
-    if not _is_rajat(message):
+    uid = _authorized_user_id(message)
+    if uid is None:
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -133,10 +140,10 @@ async def model_list_handler(message: Message) -> None:
 # --- W4.1 /ask handler ------------------------------------------------------
 
 
-async def run_sql_agent_async(question: str) -> AgentResult:
+async def run_sql_agent_async(question: str, user_id: str) -> AgentResult:
     """Thread-pool wrapper. run_sql_agent is sync (psycopg + LiteLLM are sync);
     we hop to a worker thread so the aiogram loop is never blocked."""
-    return await asyncio.to_thread(run_sql_agent, question)
+    return await asyncio.to_thread(run_sql_agent, question, user_id)
 
 
 def _format_value(v: object) -> str:
@@ -218,7 +225,8 @@ def _render_rejected(result: AgentResult) -> str:
 
 @dp.message(Command("ask"))
 async def cmd_ask(message: Message) -> None:
-    if not _is_rajat(message):
+    uid = _authorized_user_id(message)
+    if uid is None:
         return
     text = (message.text or "").strip()
     # /ask without a question
@@ -231,7 +239,7 @@ async def cmd_ask(message: Message) -> None:
 
     question = text[len("/ask "):].strip()
     try:
-        result = await run_sql_agent_async(question)
+        result = await run_sql_agent_async(question, uid)
     except Exception as e:  # noqa: BLE001
         logger.exception("/ask agent crashed for question: %s", question)
         await message.answer(f"Something went wrong: {type(e).__name__}. Try again or rephrase.")

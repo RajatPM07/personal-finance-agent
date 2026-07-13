@@ -34,8 +34,10 @@ def test_model_list_command_returns_yaml():
     fake_message.answer = AsyncMock()
 
     fake_yaml = "pdf_extraction:\n  model: gemini/gemini-2.5-flash\n"
-    with patch("skills.finance.bot.main.settings",
-               MagicMock(telegram_chat_id_rajat="42")), \
+    # Auth now flows through _authorized_user_id (→ lib.users.settings), a
+    # different import than bot.main.settings, so patch the gate seam directly.
+    with patch("skills.finance.bot.main._authorized_user_id",
+               return_value="00000000-0000-0000-0000-000000000001"), \
          patch("builtins.open", mock_open(read_data=fake_yaml)):
         asyncio.run(model_list_handler(fake_message))
 
