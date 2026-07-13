@@ -31,6 +31,7 @@ finance-backups/
 *.pdf
 *.csv
 *.xlsx
+*.xls
 
 # Logs
 *.log
