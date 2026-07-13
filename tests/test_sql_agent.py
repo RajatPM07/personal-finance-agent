@@ -1,12 +1,22 @@
 """W4.1 SQL agent orchestrator tests. LLM calls + DB calls are mocked;
 this layer is logic-only. Live integration tests live in the calibration
-harness, not the unit suite."""
+harness, not the unit suite.
+
+Multi-user note (Task 5): the static validator now enforces a per-user
+`user_id` filter, and it runs for real in these tests (only `llm` and
+`readonly_client`/`_exec_select` are mocked). So every mocked SQL that is
+expected to *pass* validation carries a `WHERE user_id = '<RAJAT_USER_ID>'`
+predicate. `run_sql_agent` is called with `RAJAT_USER_ID` as the caller."""
 from __future__ import annotations
 
 import json
 from unittest.mock import MagicMock, patch
 
 from skills.finance.agents.sql_agent import AgentResult, run_sql_agent
+from skills.finance.lib.users import RAJAT_USER_ID
+
+# Reusable per-user filter — keeps the mocked SQL valid under the Task-5 guard.
+WU = f"WHERE user_id = '{RAJAT_USER_ID}'"
 
 
 def _fake_llm_response(content: str):
@@ -35,21 +45,22 @@ def _fake_readonly_conn(rows: list[dict] | None = None):
 def test_happy_path_renders_first_attempt():
     """Groq generates valid SELECT → validator passes → DB returns rows →
     Gemini judge ok + high confidence → AgentResult.final == 'rendered'."""
+    sql = f"SELECT count(*) FROM transactions {WU}"
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
-            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(sql),
             _fake_llm_response(json.dumps({
                 "verdict": "ok", "confidence": 0.92, "reason": "matches question",
             })),
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("How many transactions total?")
+        result = run_sql_agent("How many transactions total?", RAJAT_USER_ID)
 
     assert isinstance(result, AgentResult)
     assert result.final == "rendered"
-    assert result.sql == "SELECT count(*) FROM transactions"
+    assert result.sql == sql
     assert result.rows == [{"count": 1227}]
     assert result.judge_verdict.verdict == "ok"
     assert result.escalated is False
@@ -65,7 +76,7 @@ def test_validator_reject_short_circuits_before_db_call():
             "INSERT INTO transactions (date) VALUES (CURRENT_DATE)"
         )
 
-        result = run_sql_agent("Add a fake row")
+        result = run_sql_agent("Add a fake row", RAJAT_USER_ID)
 
     assert result.final == "validator_rejected"
     assert result.judge_verdict is None
@@ -79,7 +90,7 @@ def test_genuine_empty_result_passes_judge():
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
             _fake_llm_response(
-                "SELECT count(*) FROM transactions WHERE raw_merchant ILIKE '%cricket%'"
+                f"SELECT count(*) FROM transactions {WU} AND raw_merchant ILIKE '%cricket%'"
             ),
             _fake_llm_response(json.dumps({
                 "verdict": "ok", "confidence": 0.88,
@@ -88,7 +99,7 @@ def test_genuine_empty_result_passes_judge():
         ]
         m_conn.return_value = _fake_readonly_conn([])
 
-        result = run_sql_agent("How much did I spend on cricket gear?")
+        result = run_sql_agent("How much did I spend on cricket gear?", RAJAT_USER_ID)
 
     assert result.final == "rendered"
     assert result.rows == []
@@ -114,7 +125,7 @@ def test_low_confidence_escalates_to_strict_judge():
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
-            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU}"),
             # Gemini: ok but low confidence (below the 0.85 threshold)
             _fake_llm_response(json.dumps({
                 "verdict": "ok", "confidence": 0.5, "reason": "looks ok-ish",
@@ -126,7 +137,7 @@ def test_low_confidence_escalates_to_strict_judge():
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("How many transactions total?", cfg=cfg)
+        result = run_sql_agent("How many transactions total?", RAJAT_USER_ID, cfg=cfg)
 
     assert result.final == "rendered"
     assert result.escalated is True
@@ -139,7 +150,7 @@ def test_uncertain_verdict_escalates():
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
-            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU}"),
             _fake_llm_response(json.dumps({
                 "verdict": "uncertain", "confidence": 0.9, "reason": "ambiguous question",
             })),
@@ -149,7 +160,7 @@ def test_uncertain_verdict_escalates():
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("How many things?")
+        result = run_sql_agent("How many things?", RAJAT_USER_ID)
 
     assert result.final == "rendered"
     assert result.escalated is True
@@ -161,7 +172,7 @@ def test_strict_judge_says_wrong_falls_to_retry():
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
-            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU}"),
             _fake_llm_response(json.dumps({
                 "verdict": "uncertain", "confidence": 0.4, "reason": "?",
             })),
@@ -169,18 +180,18 @@ def test_strict_judge_says_wrong_falls_to_retry():
                 "verdict": "wrong", "confidence": 0.9, "reason": "wrong table",
             })),
             # retry 1: gen + judge=wrong
-            _fake_llm_response("SELECT 1 FROM transactions"),
+            _fake_llm_response(f"SELECT 1 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r1"})),
             # retry 2: gen + judge=wrong
-            _fake_llm_response("SELECT 2 FROM transactions"),
+            _fake_llm_response(f"SELECT 2 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r2"})),
             # strict gen + judge=wrong
-            _fake_llm_response("SELECT 3 FROM transactions"),
+            _fake_llm_response(f"SELECT 3 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "still wrong"})),
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("How many transactions?")
+        result = run_sql_agent("How many transactions?", RAJAT_USER_ID)
 
     assert result.final == "surfaced_to_user"
     # confirm we DID escalate before falling through
@@ -196,19 +207,19 @@ def test_judge_wrong_triggers_groq_retry_with_critique():
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         m_llm.side_effect = [
-            _fake_llm_response("SELECT date FROM transactions"),
+            _fake_llm_response(f"SELECT date FROM transactions {WU}"),
             _fake_llm_response(json.dumps({
                 "verdict": "wrong", "confidence": 0.9,
                 "reason": "missing aggregation",
             })),
-            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU}"),
             _fake_llm_response(json.dumps({
                 "verdict": "ok", "confidence": 0.95, "reason": "fixed",
             })),
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("How many transactions total?")
+        result = run_sql_agent("How many transactions total?", RAJAT_USER_ID)
 
     assert result.final == "rendered"
     assert result.retried is True
@@ -225,18 +236,18 @@ def test_max_retries_exhausted_falls_to_sql_agent_strict():
         # gen, judge=wrong, retry1 gen, judge=wrong, retry2 gen, judge=wrong,
         # then strict gen, then strict judge=ok
         m_llm.side_effect = [
-            _fake_llm_response("SELECT 1 FROM transactions"),
+            _fake_llm_response(f"SELECT 1 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r1"})),
-            _fake_llm_response("SELECT 2 FROM transactions"),
+            _fake_llm_response(f"SELECT 2 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r2"})),
-            _fake_llm_response("SELECT 3 FROM transactions"),
+            _fake_llm_response(f"SELECT 3 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r3"})),
-            _fake_llm_response("SELECT count(*) FROM transactions"),  # strict gen
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU}"),  # strict gen
             _fake_llm_response(json.dumps({"verdict": "ok", "confidence": 0.95, "reason": "ok"})),
         ]
         m_conn.return_value = _fake_readonly_conn([{"count": 1227}])
 
-        result = run_sql_agent("?")
+        result = run_sql_agent("?", RAJAT_USER_ID)
 
     assert result.final == "rendered"
     assert result.retried is True
@@ -251,18 +262,18 @@ def test_strict_generation_also_fails_surfaces_to_user():
          patch("skills.finance.agents.sql_agent.readonly_client") as m_conn:
         # 2 retries all wrong, then strict also wrong
         m_llm.side_effect = [
-            _fake_llm_response("SELECT 1 FROM transactions"),
+            _fake_llm_response(f"SELECT 1 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r1"})),
-            _fake_llm_response("SELECT 2 FROM transactions"),
+            _fake_llm_response(f"SELECT 2 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r2"})),
-            _fake_llm_response("SELECT 3 FROM transactions"),
+            _fake_llm_response(f"SELECT 3 FROM transactions {WU}"),
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.9, "reason": "r3"})),
-            _fake_llm_response("SELECT 4 FROM transactions"),  # strict gen
+            _fake_llm_response(f"SELECT 4 FROM transactions {WU}"),  # strict gen
             _fake_llm_response(json.dumps({"verdict": "wrong", "confidence": 0.95, "reason": "still wrong"})),
         ]
         m_conn.return_value = _fake_readonly_conn([{"x": 1}])
 
-        result = run_sql_agent("ambiguous question")
+        result = run_sql_agent("ambiguous question", RAJAT_USER_ID)
 
     assert result.final == "surfaced_to_user"
     assert "rephrase" in (result.reason or "").lower()
@@ -276,6 +287,12 @@ def test_strict_generation_also_fails_surfaces_to_user():
 # "Something went wrong" — the retry-on-wrong-verdict path was never reached.
 # Post-fix: a `psycopg.Error` is synthesised into a `verdict=wrong` and routed
 # into the same retry flow the judge would have triggered.
+#
+# Task-5 note: the SQL literals below use the *valid* caller UUID so they pass
+# the static validator and reach `_exec_select` (mocked to raise). The DB-error
+# message still names the old hallucinated `'your_user_id'` literal — that's what
+# would have blown up at execution before the validator existed — so the
+# retry-critique assertion is unchanged.
 
 import psycopg  # noqa: E402  — at-bottom on purpose; only the new tests use it
 
@@ -295,19 +312,17 @@ def test_initial_db_exec_failure_routes_into_retry_path_and_succeeds():
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent._exec_select") as m_exec:
         m_llm.side_effect = [
-            _fake_llm_response(
-                "SELECT count(*) FROM transactions WHERE user_id = 'your_user_id'"
-            ),
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU}"),
             # No initial judge call expected — DB error short-circuits it.
             # Retry round 1: corrected SQL, then judge=ok.
-            _fake_llm_response("SELECT count(*) FROM transactions"),
+            _fake_llm_response(f"SELECT count(*) FROM transactions {WU} AND direction='out'"),
             _fake_llm_response(json.dumps({
                 "verdict": "ok", "confidence": 0.95, "reason": "fixed",
             })),
         ]
         m_exec.side_effect = [_uuid_cast_error(), [{"count": 1227}]]
 
-        result = run_sql_agent("How many transactions?")
+        result = run_sql_agent("How many transactions?", RAJAT_USER_ID)
 
     assert result.final == "rendered"
     assert result.retried is True
@@ -327,13 +342,13 @@ def test_db_exec_failure_persists_through_all_retries_and_strict_surfaces():
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent._exec_select") as m_exec:
         m_llm.side_effect = [
-            _fake_llm_response("SELECT 1 FROM transactions WHERE user_id = 'x'"),
+            _fake_llm_response(f"SELECT 1 FROM transactions {WU}"),
             # Retry 1: another broken SQL (validator passes, exec raises).
-            _fake_llm_response("SELECT 2 FROM transactions WHERE user_id = 'y'"),
+            _fake_llm_response(f"SELECT 2 FROM transactions {WU}"),
             # Retry 2: same.
-            _fake_llm_response("SELECT 3 FROM transactions WHERE user_id = 'z'"),
+            _fake_llm_response(f"SELECT 3 FROM transactions {WU}"),
             # Strict gen: also broken.
-            _fake_llm_response("SELECT 4 FROM transactions WHERE user_id = 'w'"),
+            _fake_llm_response(f"SELECT 4 FROM transactions {WU}"),
         ]
         m_exec.side_effect = [
             _uuid_cast_error(),
@@ -342,7 +357,7 @@ def test_db_exec_failure_persists_through_all_retries_and_strict_surfaces():
             _uuid_cast_error(),
         ]
 
-        result = run_sql_agent("query that keeps hallucinating user_id")
+        result = run_sql_agent("query that keeps hallucinating user_id", RAJAT_USER_ID)
 
     assert result.final == "surfaced_to_user"
     assert "rephrase" in (result.reason or "").lower()
@@ -356,11 +371,11 @@ def test_non_psycopg_exception_from_exec_propagates_to_caller():
     silently swallowed as a fake wrong-verdict."""
     with patch("skills.finance.agents.sql_agent.llm") as m_llm, \
          patch("skills.finance.agents.sql_agent._exec_select") as m_exec:
-        m_llm.return_value = _fake_llm_response("SELECT 1 FROM transactions")
+        m_llm.return_value = _fake_llm_response(f"SELECT 1 FROM transactions {WU}")
         m_exec.side_effect = RuntimeError("something else broke")
 
         try:
-            run_sql_agent("anything")
+            run_sql_agent("anything", RAJAT_USER_ID)
         except RuntimeError as e:
             assert "something else broke" in str(e)
         else:

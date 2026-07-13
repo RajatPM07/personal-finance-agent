@@ -11,11 +11,16 @@ reason) and as a redundancy. Role GRANTs are the durable boundary.
 """
 from __future__ import annotations
 
+import re as _re
 from dataclasses import dataclass
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
+
+_UUID_RE = _re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 @dataclass(frozen=True)
@@ -25,11 +30,21 @@ class ValidationResult:
     statement_type: str | None = None
 
 
-def validate_sql(sql: str, allowed_tables: set[str]) -> ValidationResult:
+def validate_sql(
+    sql: str,
+    allowed_tables: set[str],
+    require_user_id: str | None = None,
+) -> ValidationResult:
     """Validate a single SELECT against the allowed-tables set.
 
     Returns ValidationResult(ok=True, statement_type='select') on success,
     or ValidationResult(ok=False, reason=<human-readable why>) on rejection.
+
+    When ``require_user_id`` is set (multi-user mode), the query MUST filter by
+    ``user_id = '<that UUID>'``. This is an application-level tenancy guard
+    (defense-in-depth alongside the LLM prompt) — a leak here would expose one
+    user's finances to another. When ``require_user_id`` is None the behavior is
+    identical to the legacy single-user validator.
     """
     if not sql or not sql.strip():
         return ValidationResult(ok=False, reason="empty SQL")
@@ -66,6 +81,33 @@ def validate_sql(sql: str, allowed_tables: set[str]) -> ValidationResult:
             return ValidationResult(
                 ok=False,
                 reason=f"table {qualified!r} is not on the allowlist {sorted(allowed_tables)}",
+                statement_type="select",
+            )
+
+    if require_user_id is not None:
+        # Collect all string literals that appear in a `user_id = <literal>`
+        # comparison. The caller's UUID must be present, and no *other*
+        # UUID-shaped literal may be compared against user_id.
+        user_id_values: list[str] = []
+        for eq in stmt.find_all(exp.EQ):
+            cols = [c.name for c in eq.find_all(exp.Column)]
+            if "user_id" in cols:
+                for lit in eq.find_all(exp.Literal):
+                    if lit.is_string:
+                        user_id_values.append(lit.this)
+        if require_user_id not in user_id_values:
+            return ValidationResult(
+                ok=False,
+                reason="query must filter every table by user_id = the caller's UUID",
+                statement_type="select",
+            )
+        foreign = [
+            v for v in user_id_values if _UUID_RE.match(v) and v != require_user_id
+        ]
+        if foreign:
+            return ValidationResult(
+                ok=False,
+                reason=f"query references a foreign user_id: {foreign[0]}",
                 statement_type="select",
             )
 

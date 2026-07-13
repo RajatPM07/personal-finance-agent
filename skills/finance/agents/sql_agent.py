@@ -83,16 +83,27 @@ def _exec_select(sql: str) -> list[dict]:
         return [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
 
 
-def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult:
+def run_sql_agent(
+    question: str, user_id: str, cfg: ReviewConfig | None = None
+) -> AgentResult:
     cfg = cfg or load_review_config()
     schema = _load_schema_excerpt()
 
     today = date.today().isoformat()
 
+    # Per-user scoping directive injected into every generation prompt. The
+    # validator (require_user_id=user_id) enforces it deterministically; this
+    # line makes the LLM produce a compliant query in the first place.
+    scope_directive = (
+        f"You are answering for user_id = '{user_id}'. Every table you read that "
+        f"has a user_id column MUST be filtered with WHERE user_id = '{user_id}'.\n\n"
+    )
+
     # 1. Generate SQL via Groq Llama 3.3 70B (sql_agent route).
     gen_resp = llm(
         "sql_agent",
-        f"Today's date is {today}. Use this to compute relative date ranges like "
+        scope_directive
+        + f"Today's date is {today}. Use this to compute relative date ranges like "
         f"'last 6 months' (= date >= '{today}'::date - INTERVAL '6 months') or "
         f"'last month', 'this year', etc.\n\n"
         f"Generate a single PostgreSQL SELECT statement that answers this question:\n\n{question}\n\n"
@@ -102,7 +113,7 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
     sql = _strip_codefence(gen_resp.choices[0].message.content)
 
     # 2. Static validation.
-    val = validate_sql(sql, ALLOWED_TABLES)
+    val = validate_sql(sql, ALLOWED_TABLES, require_user_id=user_id)
     if not val.ok:
         return AgentResult(
             final="validator_rejected", sql=sql, rows=None,
@@ -177,7 +188,8 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
     current_verdict = verdict
     for _ in range(cfg.max_retry_rounds):
         retry_prompt = (
-            f"Your previous SQL:\n```sql\n{current_sql}\n```\n"
+            scope_directive
+            + f"Your previous SQL:\n```sql\n{current_sql}\n```\n"
             f"was rejected because: {current_verdict.reason}\n\n"
             f"Original question: {question}\n\n"
             f"Schema:\n{schema}\n\n"
@@ -190,7 +202,7 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
         except Exception:
             break  # LLM unavailable during retry — fall through to surface-to-user
 
-        val = validate_sql(current_sql, ALLOWED_TABLES)
+        val = validate_sql(current_sql, ALLOWED_TABLES, require_user_id=user_id)
         if not val.ok:
             continue
 
@@ -225,7 +237,8 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
     try:
         strict_gen_resp = llm(
             "sql_agent_strict",
-            f"Today's date is {today}.\n\n"
+            scope_directive
+            + f"Today's date is {today}.\n\n"
             f"Generate a single PostgreSQL SELECT that answers this question:\n\n{question}\n\n"
             f"Previous attempts failed because: {current_verdict.reason}\n\n"
             f"Schema:\n{schema}\n\n"
@@ -235,7 +248,7 @@ def run_sql_agent(question: str, cfg: ReviewConfig | None = None) -> AgentResult
     except Exception:
         strict_sql = ""  # fall through to surface-to-user
 
-    val = validate_sql(strict_sql, ALLOWED_TABLES)
+    val = validate_sql(strict_sql, ALLOWED_TABLES, require_user_id=user_id)
     if val.ok:
         try:
             strict_rows = _exec_select(strict_sql)
