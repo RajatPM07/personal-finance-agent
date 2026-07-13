@@ -85,6 +85,27 @@ def validate_sql(
             )
 
     if require_user_id is not None:
+        # Reject implicit comma cross-joins (and equivalent unlinked explicit
+        # joins, e.g. bare CROSS JOIN with no ON/USING). sqlglot represents
+        # `FROM a, b` as a `From(this=a)` plus a `joins=[Join(this=b)]` list
+        # where the Join node has no `on`/`using` arg -- indistinguishable at
+        # this level from `a CROSS JOIN b` with no condition. An unlinked
+        # join lets one filtered table (e.g. accounts scoped by user_id)
+        # cartesian-join in an *unfiltered* table (e.g. transactions),
+        # leaking every user's rows through the join. An explicit
+        # `JOIN ... ON`/`USING` is fine because it structurally ties the
+        # unfiltered table's rows to the filtered one via the join key.
+        for join in stmt.find_all(exp.Join):
+            if join.args.get("on") is None and not join.args.get("using"):
+                return ValidationResult(
+                    ok=False,
+                    reason=(
+                        "implicit cross-join (comma-separated tables) is not "
+                        "allowed under user scoping; use explicit JOIN ... ON"
+                    ),
+                    statement_type="select",
+                )
+
         # Collect all string literals that appear in a `user_id = <literal>`
         # comparison. The caller's UUID must be present, and no *other*
         # UUID-shaped literal may be compared against user_id.

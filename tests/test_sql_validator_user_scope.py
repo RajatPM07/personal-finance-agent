@@ -26,3 +26,26 @@ def test_rejects_query_with_foreign_user_id():
 def test_require_user_id_none_preserves_legacy_behavior():
     sql = "SELECT sum(amount) FROM transactions"
     assert validate_sql(sql, TABLES, require_user_id=None).ok
+
+
+def test_rejects_implicit_cross_join():
+    # transactions is left unfiltered and implicitly cartesian-joined with
+    # accounts, which IS filtered by the caller's user_id -- this must not
+    # be enough to leak other users' transactions.
+    sql = (
+        "SELECT sum(t.amount) FROM transactions t, accounts a "
+        f"WHERE a.user_id = '{UID}'"
+    )
+    r = validate_sql(sql, TABLES, require_user_id=UID)
+    assert not r.ok
+    assert "cross-join" in r.reason.lower()
+
+
+def test_accepts_explicit_join_with_user_scope():
+    sql = (
+        "SELECT sum(t.amount) FROM transactions t "
+        "JOIN accounts a ON a.id = t.account_id "
+        f"WHERE a.user_id = '{UID}'"
+    )
+    r = validate_sql(sql, TABLES, require_user_id=UID)
+    assert r.ok
