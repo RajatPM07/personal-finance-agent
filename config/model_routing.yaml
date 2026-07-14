@@ -25,7 +25,7 @@
 
 pdf_extraction:
   model: gemini/gemini-2.5-flash
-  fallbacks: [anthropic/claude-sonnet-4-6]   # vision-capable; needs paid Anthropic to fire
+  fallbacks: []                              # no other free vision-capable model; Gemini-only
   stakes: high
 
 merchant_categorization:
@@ -39,17 +39,16 @@ income_classification:
   stakes: medium
 
 sql_agent:
-  model: groq/llama-3.3-70b-versatile           # was: anthropic/claude-sonnet-4-6 — flipped 2026-05-19 under zero-spend constraint
-  fallbacks: [anthropic/claude-sonnet-4-6]      # was: [groq/...]
+  model: groq/llama-3.3-70b-versatile           # zero-spend constraint: no paid Anthropic
+  fallbacks: [gemini/gemini-2.5-flash]          # free fallback on Groq unavailability
   stakes: high
   # Reviewer layer (sql_agent_judge + sql_agent_judge_strict + sql_agent_strict)
   # catches the quality cases where Llama's degraded multi-CTE handling matters.
-  # Sonnet fallback fires only on Groq unavailability — the reviewer-layer
-  # judge escalation is the cost-observable spend path, separate from this.
+  # Gemini fallback fires only on Groq unavailability.
 
 affordability_reasoning:
-  model: groq/llama-3.3-70b-versatile           # was: anthropic/claude-sonnet-4-6 — same 2026-05-19 flip
-  fallbacks: [anthropic/claude-sonnet-4-6]
+  model: groq/llama-3.3-70b-versatile           # zero-spend constraint: no paid Anthropic
+  fallbacks: [gemini/gemini-2.5-flash]
   stakes: high
   # NO reviewer layer in V1 — gated by PRD §6.5 data-quality guard until ≥60d
   # of clean ingested history (~late June 2026). Revisit reviewer design when
@@ -74,18 +73,18 @@ embeddings:
 
 sql_agent_judge:
   model: gemini/gemini-2.5-flash
-  fallbacks: [anthropic/claude-sonnet-4-6]
+  fallbacks: [groq/llama-3.3-70b-versatile]
   stakes: medium
   # Primary judge in the reviewer layer. Returns JSON {verdict, confidence, reason}.
 
 sql_agent_judge_strict:
-  model: anthropic/claude-sonnet-4-6
-  fallbacks: []                                 # if Sonnet fails here, reviewer surfaces "uncertain" to user (no silent degrade to the model we escalated away from)
+  model: groq/llama-3.3-70b-versatile           # zero-spend: Groq, a *different* model from the gemini primary judge so escalation still adds a second opinion
+  fallbacks: []                                 # if Groq fails here, reviewer surfaces "uncertain" to user (no silent degrade to the model we escalated away from)
   stakes: high
   # Escalation judge — called explicitly when Gemini returns uncertain / low-confidence.
 
 sql_agent_strict:
-  model: anthropic/claude-sonnet-4-6
+  model: gemini/gemini-2.5-flash                # zero-spend: Gemini, a different model from the groq sql_agent primary
   fallbacks: []                                 # last resort — surfaces "rephrase?" to user on failure (fail loud, don't silently degrade)
   stakes: high
   # Last-resort SQL generation, called only after Groq retry-with-critique fails the judge.
