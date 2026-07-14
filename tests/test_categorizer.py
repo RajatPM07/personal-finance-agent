@@ -148,3 +148,33 @@ class TestOverrides:
         from scripts.backfill_categorization import KNOWN_OVERRIDES
         for _needle, cat in KNOWN_OVERRIDES:
             assert cat in {"Rent", "Self Transfer"}
+
+
+class TestFinalizeMapping:
+    """finalize_mapping merges overrides + a base map (LLM or cached JSON),
+    guaranteeing every merchant lands on a valid category."""
+
+    ALLOWED = {"Shopping", "Rent", "Self Transfer", "Needs Review"}
+
+    def test_override_wins_over_base_map(self):
+        from scripts.backfill_categorization import finalize_mapping
+        out = finalize_mapping(
+            ["Bank Account XXXXXXXXXXX4891"],
+            {"Bank Account XXXXXXXXXXX4891": "Shopping"},  # LLM/cached said Shopping
+            self.ALLOWED,
+        )
+        assert out["Bank Account XXXXXXXXXXX4891"] == "Rent"  # override wins
+
+    def test_valid_base_map_value_used(self):
+        from scripts.backfill_categorization import finalize_mapping
+        out = finalize_mapping(["Myntra"], {"Myntra": "Shopping"}, self.ALLOWED)
+        assert out["Myntra"] == "Shopping"
+
+    def test_unknown_or_missing_falls_back(self):
+        from scripts.backfill_categorization import finalize_mapping
+        out = finalize_mapping(
+            ["Ghost", "Weird"],
+            {"Ghost": "Crypto"},  # invalid category; "Weird" absent (stale cache)
+            self.ALLOWED,
+        )
+        assert out == {"Ghost": "Needs Review", "Weird": "Needs Review"}

@@ -214,3 +214,17 @@ Format: date → pattern → root cause → rule.
 **Side finding (V1 backlog):** AMEX statement re-ingest produced apparent duplicate rows (every `PAYMENT RECEIVED. THANK YOU` and several merchant credits appear twice with same date/amount). The `import_hash` dedup probably has a gap. Surfaced during the W5.1 backfill query for sample-link validation. Not in W5.1 scope; track separately.
 
 **Captured as:** this entry; schema migration 008; spec `docs/superpowers/specs/2026-05-21-refund-detection-design.md`; plan `docs/superpowers/plans/2026-05-21-w5-1-refund-detection.md`; lib `skills/finance/categorization/refund_detector.py`.
+
+---
+
+## Categorization backfill — cache the LLM mapping; don't re-invoke per iteration (2026-07-15)
+
+**Mistake:** During Aayushi's categorization backfill I ran the LLM categorizer 4+ times (three dry-runs to inspect quality + retried applies to chase a `created_by` CHECK-constraint bug). Each run re-called `llm("merchant_categorization")` for all ~26 batches. This drained Groq's free-tier **daily** token cap (TPD 100,000). By the time the *successful* apply ran, both Groq and the Gemini fallback were rate-limited, so 387 spend rows fell to `Needs Review` (the clean dry-run had ~240). Had to reset the quota-collateral rows to NULL and defer a clean re-run until the daily quota reset.
+
+**Rules for myself:**
+1. **Run the LLM pass ONCE; persist the merchant→category mapping to a file.** Dry-run and apply must read the same cached mapping, not re-call the model. Re-inspecting output must never re-spend tokens.
+2. **Fix write-path bugs against a stub/dry mapping first.** The `created_by` CHECK violation (`created_by ∈ {'agent','user','seed'}`, I passed a UUID) was a pure DB-shape bug — I should have caught it with a 2-row seed test before running the full LLM phase, not by re-running the whole pipeline.
+3. **Free-tier LLM budget is a shared, exhaustible daily resource.** Treat repeated full-dataset LLM runs as costly. Groq free tier: ~12k TPM AND ~100k TPD. Pace (done) AND cap total runs.
+4. **When stderr is redirected on a data-mutating script, a masked traceback looks like a silent no-op** (`2>/dev/null` hid the CheckViolation; output stopped at the last stdout flush and the harness reported exit 0). Run data-mutating scripts unbuffered with stderr visible.
+
+**Captured as:** this entry; `skills/finance/categorization/categorizer.py`; `scripts/backfill_categorization.py`.

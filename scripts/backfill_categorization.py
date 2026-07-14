@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -63,6 +64,25 @@ def override_category(merchant: str) -> str | None:
     return None
 
 
+def finalize_mapping(
+    merchant_names: list[str], base_map: dict[str, str], allowed: set[str]
+) -> dict[str, str]:
+    """Produce the authoritative merchant→category map: deterministic overrides
+    win, then any base_map (LLM or cached) value that is a valid category, else
+    the fallback. Guarantees every merchant has a valid category — so a cached
+    map (--map-in) is safe even if stale or partial."""
+    out: dict[str, str] = {}
+    for m in merchant_names:
+        ov = override_category(m)
+        if ov is not None:
+            out[m] = ov
+        elif base_map.get(m) in allowed:
+            out[m] = base_map[m]
+        else:
+            out[m] = FALLBACK_CATEGORY
+    return out
+
+
 def _connect() -> psycopg.Connection:
     load_dotenv(REPO_ROOT / ".env")
     db_url = os.environ.get("SUPABASE_DB_URL")
@@ -82,10 +102,12 @@ def reference_category_names(conn: psycopg.Connection, ref_user: str) -> list[st
 def ensure_categories(conn: psycopg.Connection, user_id: str, ref_user: str) -> int:
     """Clone any of the reference user's category names the target user lacks.
     Flat clone (name + is_system); returns the number of rows inserted."""
+    # created_by is a text enum ('agent'|'user'|'seed'); these rows are seeded
+    # from the reference taxonomy, so 'seed'.
     cur = conn.execute(
         """
         INSERT INTO categories (user_id, name, is_system, created_by)
-        SELECT %s, r.name, r.is_system, %s
+        SELECT %s, r.name, r.is_system, 'seed'
         FROM categories r
         WHERE r.user_id = %s
           AND NOT EXISTS (
@@ -93,7 +115,7 @@ def ensure_categories(conn: psycopg.Connection, user_id: str, ref_user: str) -> 
             WHERE t.user_id = %s AND t.name = r.name
           )
         """,
-        (user_id, user_id, ref_user, user_id),
+        (user_id, ref_user, user_id),
     )
     return cur.rowcount
 
@@ -147,6 +169,8 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=12, help="merchants per LLM call")
     ap.add_argument("--pause", type=float, default=4.0,
                     help="seconds between LLM batches (free-tier TPM pacing)")
+    ap.add_argument("--map-out", help="write the computed merchant→category map to this JSON file")
+    ap.add_argument("--map-in", help="load the map from this JSON file and SKIP the LLM entirely")
     args = ap.parse_args()
 
     conn = _connect()
@@ -178,22 +202,36 @@ def main() -> int:
         print("Nothing to categorize.")
         return 0
 
-    # Deterministic overrides first; only the remainder goes to the LLM.
-    overridden: dict[str, str] = {}
-    for m in merchant_names:
-        cat = override_category(m)
-        if cat is not None:
-            overridden[m] = cat
-    to_llm = [m for m in merchant_names if m not in overridden]
-    if overridden:
-        print(f"{len(overridden)} merchant(s) resolved by deterministic override (skip LLM).")
+    allowed_set = set(allowed)
+    if args.map_in:
+        with open(args.map_in) as f:
+            raw_map = json.load(f)
+        print(f"Loaded cached map for {len(raw_map)} merchants from {args.map_in} — SKIPPING LLM.")
+        mapping = finalize_mapping(merchant_names, raw_map, allowed_set)
+    else:
+        # Deterministic overrides first; only the remainder goes to the LLM.
+        overridden: dict[str, str] = {}
+        for m in merchant_names:
+            cat = override_category(m)
+            if cat is not None:
+                overridden[m] = cat
+        to_llm = [m for m in merchant_names if m not in overridden]
+        if overridden:
+            print(f"{len(overridden)} merchant(s) resolved by deterministic override (skip LLM).")
 
-    n_batches = (len(to_llm) + args.batch_size - 1) // max(args.batch_size, 1)
-    print(f"\nCalling LLM ({n_batches} batch(es), {args.pause}s pacing)...")
-    mapping = categorize_merchants(
-        to_llm, allowed_for_llm, batch_size=args.batch_size, pause_s=args.pause
-    )
-    mapping.update(overridden)  # overrides win
+        n_batches = (len(to_llm) + args.batch_size - 1) // max(args.batch_size, 1)
+        print(f"\nCalling LLM ({n_batches} batch(es), {args.pause}s pacing)...")
+        llm_map = categorize_merchants(
+            to_llm, allowed_for_llm, batch_size=args.batch_size, pause_s=args.pause
+        )
+        llm_map.update(overridden)  # overrides win
+        mapping = finalize_mapping(merchant_names, llm_map, allowed_set)
+
+    if args.map_out:
+        with open(args.map_out, "w") as f:
+            json.dump(mapping, f, indent=2, ensure_ascii=False)
+        print(f"Wrote merchant→category map to {args.map_out} "
+              "(reuse with --map-in to apply without spending LLM tokens).")
 
     # Summarise by category for a readable dry-run.
     by_cat: dict[str, list[tuple[str, int]]] = {}
