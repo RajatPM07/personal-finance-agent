@@ -16,9 +16,40 @@ os.environ.setdefault("ANTHROPIC_API_KEY", settings.anthropic_api_key)
 os.environ.setdefault("GEMINI_API_KEY", settings.gemini_api_key)
 os.environ.setdefault("GROQ_API_KEY", settings.groq_api_key)
 
-litellm.success_callback = ["supabase"]
-os.environ.setdefault("SUPABASE_URL", settings.supabase_url)
-os.environ.setdefault("SUPABASE_KEY", settings.supabase_service_key)
+# Request logging is done EXPLICITLY in llm() below — NOT via LiteLLM's built-in
+# callbacks. The built-in `["supabase"]` success callback persisted the full
+# rendered prompt (`messages`) and `response` body to request_logs; for the SQL
+# judge that is schema_excerpt + result_preview = real PII (CLAUDE.md invariant
+# #12 / spec §4.5). We keep both callback lists empty so nothing logs bodies,
+# and write metadata-only rows ourselves from the single llm() choke point.
+# (A LiteLLM CustomLogger was tried first but its success hook fires on an
+# ephemeral async loop that is torn down before the write lands — unreliable.)
+litellm.success_callback = []
+litellm.callbacks = []
+
+
+def _log_request_metadata(task: str, fallback_model: str, resp: object, latency_s: float) -> None:
+    """Write ONLY non-content metadata (model, cost, latency, task, call id) to
+    request_logs — never the prompt `messages` or the `response` body.
+    Best-effort: a logging failure must never break the LLM call."""
+    try:
+        from skills.finance.lib.db import service_client
+
+        try:
+            total_cost = float(litellm.completion_cost(completion_response=resp))
+        except Exception:  # noqa: BLE001 — cost-map miss must not drop the row
+            total_cost = 0.0
+        payload = {
+            "model": getattr(resp, "model", None) or fallback_model,
+            "total_cost": total_cost,
+            "response_time": latency_s,
+            "status": "success",
+            "litellm_call_id": getattr(resp, "id", None),
+            "additional_details": {"task": task},  # task name is metadata, not PII
+        }
+        service_client().table("request_logs").insert(payload).execute()
+    except Exception as e:  # noqa: BLE001 — logging must never break the LLM call
+        logger.warning("metadata request-log write failed: %s", e)
 
 _ROUTING_PATH = Path(__file__).resolve().parents[3] / "config" / "model_routing.yaml"
 
@@ -78,7 +109,10 @@ def llm(
     last_err: litellm.exceptions.RateLimitError | None = None
     for attempt in range(_MAX_RETRIES):
         try:
-            return litellm.completion(**kwargs)
+            _t0 = time.monotonic()
+            resp = litellm.completion(**kwargs)
+            _log_request_metadata(task, cfg["model"], resp, time.monotonic() - _t0)
+            return resp
         except litellm.exceptions.RateLimitError as e:
             last_err = e
             # If this was the final attempt, fall through to raise.
