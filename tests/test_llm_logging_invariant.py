@@ -1,34 +1,74 @@
-"""W4.1 §4.5 sensitivity invariant: lib/llm.py's success_callback writes
-ONLY metadata (token counts, model, latency, cost) to request_logs.
-It does NOT persist the rendered prompt body. Extending this without an
-explicit privacy review = leaking PII (schema_excerpt + result_preview).
+"""W4.1 §4.5 sensitivity invariant: request logging persists ONLY metadata
+(model, cost, latency, status, task, call id) to request_logs — never the
+rendered prompt `messages` or the `response` body.
 
-This test guards the invariant by inspecting llm.py's source for the
-callback registration pattern. It is brittle by design — any change to
-how callbacks are registered should force a deliberate read of this test."""
+History: this was previously enforced by grepping lib/llm.py for the line
+`litellm.success_callback = ["supabase"]`. That was false assurance — the
+built-in "supabase" callback it blessed *does* persist full messages/response,
+so the grep passed green while real PII (schema_excerpt + result_preview) was
+written to Supabase. Logging is now done explicitly in llm() (LiteLLM's
+callback lists are kept empty), and this test verifies BEHAVIOR: the row we
+write carries only non-content metadata.
+"""
 from __future__ import annotations
 
-from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import litellm
 
 
-def test_llm_module_does_not_register_body_logging_callback():
-    """llm.py registers `litellm.success_callback = ["supabase"]` ONLY.
-    Adding a custom callable that captures `messages=` or `prompt` content
-    would defeat this invariant — fail loudly if the surface changes."""
-    src = Path("skills/finance/lib/llm.py").read_text()
+def test_no_builtin_body_logging_callback_active():
+    """The built-in `"supabase"` callback (which logs messages+response) must
+    not be registered on either LiteLLM callback list."""
+    import skills.finance.lib.llm  # noqa: F401  (registers the empty lists on import)
 
-    # The exact line we expect — if anyone re-registers callbacks differently,
-    # this assertion forces a review.
-    assert 'litellm.success_callback = ["supabase"]' in src, (
-        "lib/llm.py changed how it registers LiteLLM callbacks. "
-        "Per CLAUDE.md invariant on prompt sensitivity, any new callback "
-        "MUST NOT capture `messages=` or full prompt bodies."
-    )
+    assert "supabase" not in (litellm.success_callback or [])
+    assert "supabase" not in (litellm.callbacks or [])
 
-    # And no signs of body-capturing helpers
-    forbidden = ["full_prompt", "messages_to_db", "log_prompt_body", "capture_prompt"]
-    for token in forbidden:
-        assert token not in src, (
-            f"Forbidden token {token!r} appeared in lib/llm.py — "
-            f"this implies prompt-body logging, which violates spec §4.5."
-        )
+
+def test_metadata_row_has_no_message_or_response_bodies():
+    """Drive the explicit logger with a response object carrying content and
+    assert the row written to request_logs has ONLY metadata keys."""
+    from skills.finance.lib import llm
+
+    captured: dict = {}
+    builder = MagicMock()
+    builder.insert.side_effect = lambda payload: (captured.__setitem__("payload", payload) or builder)
+    client = MagicMock()
+    client.table.return_value = builder
+
+    # A ModelResponse-like object with content that must NOT be persisted.
+    resp = MagicMock()
+    resp.model = "claude-sonnet-4-6"
+    resp.id = "call-abc"
+
+    with patch("skills.finance.lib.db.service_client", return_value=client), \
+         patch.object(litellm, "completion_cost", return_value=0.0123):
+        llm._log_request_metadata("sql_agent_judge", "fallback-model", resp, latency_s=1.5)
+
+    payload = captured["payload"]
+    client.table.assert_called_once_with("request_logs")
+    assert "messages" not in payload
+    assert "response" not in payload
+    assert set(payload.keys()) <= {
+        "model", "total_cost", "response_time", "status", "litellm_call_id",
+        "additional_details",
+    }
+    assert payload["model"] == "claude-sonnet-4-6"
+    assert payload["total_cost"] == 0.0123
+    assert payload["response_time"] == 1.5
+    assert payload["litellm_call_id"] == "call-abc"
+    assert payload["additional_details"] == {"task": "sql_agent_judge"}
+
+
+def test_logging_failure_never_raises():
+    """A DB failure while logging must be swallowed — logging can't break the
+    LLM call."""
+    from skills.finance.lib import llm
+
+    resp = MagicMock()
+    resp.model = "m"
+    resp.id = "x"
+    with patch("skills.finance.lib.db.service_client", side_effect=RuntimeError("db down")), \
+         patch.object(litellm, "completion_cost", return_value=0.0):
+        llm._log_request_metadata("some_task", "m", resp, latency_s=0.1)  # must not raise

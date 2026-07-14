@@ -3,7 +3,7 @@ Path A (API) or Path B (logs-derived) — both exposed through the same
 async function `check_anthropic_balance()`."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,3 +46,31 @@ async def test_fetch_failure_alerts_once_then_continues():
 
     m_send.assert_called_once()
     assert "couldn't" in m_send.call_args[0][0].lower() or "failed" in m_send.call_args[0][0].lower()
+
+
+def test_fetch_balance_queries_total_cost_and_claude_models():
+    """Regression: the live request_logs table stores per-call USD in
+    `total_cost` and logs Anthropic models as `claude-*`. Selecting
+    `response_cost` raised 42703 (daily failure); filtering `%anthropic%`
+    matched no rows and silently reported a permanent full balance. This
+    test exercises the real query construction — mocking only the client —
+    so either regression would fail it."""
+    from skills.finance.monitoring import alerts
+
+    fake_result = MagicMock()
+    fake_result.data = [{"total_cost": 0.10}, {"total_cost": 0.15}, {"total_cost": None}]
+    builder = MagicMock()
+    builder.select.return_value = builder
+    builder.ilike.return_value = builder
+    builder.execute.return_value = fake_result
+    client = MagicMock()
+    client.table.return_value = builder
+
+    with patch.object(alerts, "service_client", return_value=client):
+        balance = alerts._fetch_anthropic_balance_usd()
+
+    client.table.assert_called_once_with("request_logs")
+    builder.select.assert_called_once_with("total_cost")
+    builder.ilike.assert_called_once_with("model", "%claude%")
+    # $5.00 starting credit minus (0.10 + 0.15 + 0) spent.
+    assert balance == pytest.approx(4.75)

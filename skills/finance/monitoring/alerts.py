@@ -49,17 +49,20 @@ def _fetch_anthropic_balance_usd() -> float:
     if/when the API path is available."""
     initial_credit_usd = 5.00  # per memory project_pfa_status.md
     # request_logs is auto-written by LiteLLM's supabase callback per W1.
-    # Column is `response_cost` (USD) per the LiteLLM-supabase integration shape.
+    # Verified against the live table (2026-07-14): the per-call USD cost column
+    # is `total_cost` (not `response_cost`), and Anthropic models are logged as
+    # `claude-*` (e.g. `claude-sonnet-4-6`) — an `%anthropic%` filter matches
+    # nothing and would silently report a permanent full balance.
     res = (
         service_client()
         .table("request_logs")
-        .select("response_cost")
-        .ilike("model", "%anthropic%")
+        .select("total_cost")
+        .ilike("model", "%claude%")
         .execute()
     )
     data = cast(list[dict[str, Any]], res.data or [])
     spent = sum(
-        float(r.get("response_cost") or 0.0)
+        float(r.get("total_cost") or 0.0)
         for r in data
     )
     return initial_credit_usd - spent
