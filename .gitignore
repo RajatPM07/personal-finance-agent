@@ -31,6 +31,7 @@ finance-backups/
 *.pdf
 *.csv
 *.xlsx
+*.xls
 
 # Logs
 *.log
@@ -51,6 +52,10 @@ github_research_results.md
 
 # Credentials
 credentials/gmail_oauth.json
+
+# Real statement drops (PII — never commit). Parsed into gitignored golden fixtures.
+Aayushi Statement/
+*Statement/
 
 # W4.1 — real NL→SQL calibration pairs are real questions about real data.
 # pairs.example.yaml (with synthetic examples) IS committed; pairs.yaml is not.

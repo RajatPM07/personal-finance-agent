@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  One-shot Ayushi historical backfill. Fires once at 04:00 IST, then the
+  wrapper (scripts/run_ayushi_backfill_once.sh) tears this job down so it
+  never repeats. Not a recurring job — kept in the repo for auditability.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rajat.pfa.ayushi-backfill</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/rajat/AntiGravity/Personal finance Agent/scripts/run_ayushi_backfill_once.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/rajat/AntiGravity/Personal finance Agent</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>4</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/rajat/finance-logs/ayushi-backfill.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rajat/finance-logs/ayushi-backfill.stderr.log</string>
+</dict>
+</plist>

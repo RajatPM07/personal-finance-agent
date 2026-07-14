@@ -288,6 +288,44 @@ def test_detect_bank_ambiguous_paytm_plus_icici_returns_none():
     assert detect_bank_from_filename("paytm_icici_combined.xlsx") is None
 
 
+# W-PhonePe additions ------------------------------------------------------------
+
+def test_bank_literal_includes_phonepe_upi():
+    """PhonePe added for Ayushi's UPI source-of-truth — type-level guard against typos."""
+    from typing import get_args
+
+    from skills.finance.ingestion._common import Bank
+    assert "phonepe_upi" in get_args(Bank)
+    assert "icici_cc" in get_args(Bank)
+    assert "amex_cc" in get_args(Bank)
+    assert "paytm_upi" in get_args(Bank)
+    assert "icici_savings" in get_args(Bank)
+
+
+def test_detect_bank_phonepe_canonical():
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("PhonePe_Transaction_Statement.pdf") == "phonepe_upi"
+
+
+def test_detect_bank_phonepe_loose():
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("phonepe_export_2026.pdf") == "phonepe_upi"
+
+
+def test_detect_bank_ambiguous_phonepe_plus_icici_returns_none():
+    """If a filename mentions both PhonePe and ICICI it's ambiguous."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("phonepe_icici_combined.pdf") is None
+
+
+def test_detect_bank_phonepe_does_not_break_existing():
+    """Regression: existing bank detection unchanged after PhonePe added."""
+    from skills.finance.ingestion._common import detect_bank_from_filename
+    assert detect_bank_from_filename("icici_cc_2026_04.pdf") == "icici_cc"
+    assert detect_bank_from_filename("amex_cc_2026_04.xlsx") == "amex_cc"
+    assert detect_bank_from_filename("paytm_upi_apr25_mar26.xlsx") == "paytm_upi"
+
+
 def test_parse_result_insertable_rows_excludes_amex_routed():
     from datetime import date
     from decimal import Decimal

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     supabase_db_url: str
     telegram_bot_token: str
     telegram_chat_id_rajat: str
+    telegram_chat_id_ayushi: str = ""   # empty until Ayushi's chat id is known
     telegram_alert_bot_token: str
     telegram_alert_chat_id: str
     healthcheck_url: str
