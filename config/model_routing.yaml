@@ -80,13 +80,13 @@ sql_agent_judge:
 
 sql_agent_judge_strict:
   model: anthropic/claude-sonnet-4-6
-  fallbacks: [gemini/gemini-2.5-flash]          # Gemini catches Anthropic overload/unavailable
+  fallbacks: []                                 # if Sonnet fails here, reviewer surfaces "uncertain" to user (no silent degrade to the model we escalated away from)
   stakes: high
   # Escalation judge — called explicitly when Gemini returns uncertain / low-confidence.
 
 sql_agent_strict:
   model: anthropic/claude-sonnet-4-6
-  fallbacks: [gemini/gemini-2.5-flash]          # Gemini catches Anthropic overload/unavailable
+  fallbacks: []                                 # last resort — surfaces "rephrase?" to user on failure (fail loud, don't silently degrade)
   stakes: high
   # Last-resort SQL generation, called only after Groq retry-with-critique fails the judge.
   # Distinct from sql_agent.fallbacks so cost is observable + intentional, not implicit.

@@ -90,13 +90,13 @@ async def _pickbank_callback(callback: CallbackQuery) -> None:
     _, bank, token = data
 
     if bank == "cancel":
-        if callback.message:
+        if isinstance(callback.message, Message):
             await callback.message.edit_text("Cancelled.")
         return
 
     pending = pop_pending_doc(token)
     if pending is None:
-        if callback.message:
+        if isinstance(callback.message, Message):
             await callback.message.edit_text("Session expired — please resend the file.")
         return
 
@@ -114,7 +114,7 @@ async def _pickbank_callback(callback: CallbackQuery) -> None:
     await bot.download(file_id, destination=str(staging))
     staging.rename(canonical)
     logger.info("pickbank: saved %s as %s", bank, canonical)
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text(f"Saved as {canonical.name} — processing.")
 
 

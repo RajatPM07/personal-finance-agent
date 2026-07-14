@@ -26,6 +26,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import TypedDict
 
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
@@ -70,7 +71,14 @@ logger = logging.getLogger(__name__)
 #
 # Adjust query strings if your statement emails differ. Test by searching
 # exactly these queries in Gmail yourself first.
-SEARCH_RULES = [
+class SearchRule(TypedDict):
+    label: str
+    query: str
+    filename_prefix: str
+    pending: bool
+
+
+SEARCH_RULES: list[SearchRule] = [
     {
         "label": "ICICI CC",
         "query": (

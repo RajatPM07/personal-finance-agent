@@ -46,8 +46,11 @@ class TestFetchBriefData:
              (datetime(2026, 2, 1), Decimal("270000"))],
             # 4. MTD by category
             [("Dining Out", Decimal("9200"))],
-            # 5. category monthly avg over prior full months
-            [("Dining Out", Decimal("22575"))],
+            # 5. category monthly avg over prior full months. Kept BELOW the MTD
+            #    so Dining Out is an overspend even against the *full*-month avg
+            #    — i.e. a mover on any calendar day, making this assertion
+            #    date-independent (the pro-rated avg = avg * day/dim <= avg).
+            [("Dining Out", Decimal("5000"))],
         ])
         data = mb.fetch_brief_data(WATERMARK)
         assert [t.merchant for t in data.new_txns] == ["Amazon", "Swiggy"]

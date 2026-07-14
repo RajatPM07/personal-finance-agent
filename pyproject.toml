@@ -67,7 +67,7 @@ explicit_package_bases = true
 plugins = ["pydantic.mypy"]
 # Third-party libs without stubs
 [[tool.mypy.overrides]]
-module = ["bout.*", "casparser.*", "mftool.*", "camelot.*", "pdfplumber.*", "pikepdf.*", "pandas", "pandas.*", "yaml", "yaml.*", "litellm", "litellm.*", "requests", "requests.*", "apscheduler.*"]
+module = ["bout.*", "casparser.*", "mftool.*", "camelot.*", "pdfplumber.*", "pikepdf.*", "pandas", "pandas.*", "yaml", "yaml.*", "litellm", "litellm.*", "requests", "requests.*", "apscheduler.*", "google_auth_oauthlib.*", "googleapiclient.*", "google.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

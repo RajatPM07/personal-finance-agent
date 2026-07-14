@@ -19,16 +19,21 @@ def test_unambiguous_icici_pdf_saves_with_canonical_prefix(tmp_path, monkeypatch
     fake_message = MagicMock(chat=MagicMock(id=42), document=fake_doc)
     fake_message.answer = AsyncMock()
 
+    async def _fake_download(_doc, destination):
+        Path(destination).write_bytes(b"pdf-bytes")
+
     fake_bot = MagicMock()
-    fake_bot.download = AsyncMock()
+    fake_bot.download = AsyncMock(side_effect=_fake_download)
 
     asyncio.run(handle_document(fake_message, bot=fake_bot))
 
     fake_bot.download.assert_called_once()
-    save_path = Path(fake_bot.download.call_args.kwargs["destination"])
-    assert save_path.parent == inbox
-    assert save_path.name.startswith("icici_cc_")
-    assert save_path.suffix == ".pdf"
+    # The handler downloads to a hidden `.dl_` staging file, then renames it to
+    # the canonical name — assert on the final saved file, not the staging dest.
+    saved = [p for p in inbox.iterdir() if not p.name.startswith(".dl_")]
+    assert len(saved) == 1
+    assert saved[0].name.startswith("icici_cc_")
+    assert saved[0].suffix == ".pdf"
     fake_message.answer.assert_called_once()
 
 
@@ -46,15 +51,19 @@ def test_unambiguous_amex_xlsx_saves_with_canonical_prefix(tmp_path, monkeypatch
     fake_message = MagicMock(chat=MagicMock(id=42), document=fake_doc)
     fake_message.answer = AsyncMock()
 
+    async def _fake_download(_doc, destination):
+        Path(destination).write_bytes(b"xlsx-bytes")
+
     fake_bot = MagicMock()
-    fake_bot.download = AsyncMock()
+    fake_bot.download = AsyncMock(side_effect=_fake_download)
 
     asyncio.run(handle_document(fake_message, bot=fake_bot))
 
     fake_bot.download.assert_called_once()
-    save_path = Path(fake_bot.download.call_args.kwargs["destination"])
-    assert save_path.name.startswith("amex_cc_")
-    assert save_path.suffix == ".xlsx"
+    saved = [p for p in inbox.iterdir() if not p.name.startswith(".dl_")]
+    assert len(saved) == 1
+    assert saved[0].name.startswith("amex_cc_")
+    assert saved[0].suffix == ".xlsx"
 
 
 def test_ambiguous_filename_sends_inline_keyboard(tmp_path, monkeypatch):
