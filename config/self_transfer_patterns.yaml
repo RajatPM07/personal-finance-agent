@@ -10,3 +10,14 @@
 # AMEX CC — account_id from 003_seed.local.sql
 "10000000-0000-0000-0000-000000000005":
   - "PAYMENT RECEIVED. THANK YOU"
+
+# Aayushi ICICI Amazon Pay CC — CC bill payments credited to the card show as
+# "…INFINITY PAYMENT RECEIVED, THANK…" or "…BBPS Payment received…".
+"20000000-0000-0000-0000-000000000001":
+  - "PAYMENT RECEIVED"
+  - "BBPS Payment received"
+
+# Aayushi ICICI CC 2 — same ICICI credit-card payment markers.
+"20000000-0000-0000-0000-000000000002":
+  - "PAYMENT RECEIVED"
+  - "BBPS Payment received"
