@@ -34,11 +34,14 @@ from skills.finance.categorization.categorizer import (
     FALLBACK_CATEGORY,
     categorize_merchants,
 )
+from skills.finance.categorization.normalize import normalize_merchant
+from skills.finance.lib.users import AYUSHI_USER_ID, RAJAT_USER_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-RAJAT_USER_ID = "00000000-0000-0000-0000-000000000001"  # reference taxonomy
-AYUSHI_USER_ID = "00000000-0000-0000-0000-000000000002"
+# User ids are the single-source-of-truth constants from lib.users
+# (RAJAT_USER_ID = reference taxonomy). Re-exported here for CLI callers.
+__all__ = ["RAJAT_USER_ID", "AYUSHI_USER_ID"]
 SELF_TRANSFER_CATEGORY = "Self Transfer"
 
 # Deterministic overrides for internal-transfer / bare-account strings the LLM
@@ -51,6 +54,13 @@ KNOWN_OVERRIDES: list[tuple[str, str]] = [
     ("4891", "Rent"),                 # rent to Sunil Bhatkar (a/c …4891), ₹70k/mo
     ("Trf to PPF", SELF_TRANSFER_CATEGORY),  # PPF contribution — own investment
     ("TRF TO FD", SELF_TRANSFER_CATEGORY),   # FD creation — own investment
+    # ICICI CC internal line-items. The categorizer system prompt tells the LLM
+    # NOT to guess 'Bank Charges' for unidentifiable strings, so these deterministic
+    # rows own them (else they fall to 'Needs Review'). Matched on the *normalized*
+    # merchant (ref + reward-points already stripped).
+    ("Interest Charges", "Bank Charges"),
+    ("Interest Amount Amortization", "Bank Charges"),
+    ("IGST", "Bank Charges"),         # GST on CC interest/fees
 ]
 
 
@@ -129,11 +139,20 @@ def category_ids(conn: psycopg.Connection, user_id: str) -> dict[str, str]:
 
 def distinct_uncategorized_merchants(
     conn: psycopg.Connection, user_id: str
-) -> list[tuple[str, int]]:
-    """Distinct raw_merchant (+ row count) for uncategorized SPEND rows — the
-    set the LLM must categorize. Scoped to direction='out' (income/refund
-    credits are not spend and have no spend category) and to non-self-transfer
-    rows (those are hard-mapped to 'Self Transfer' without an LLM call)."""
+) -> tuple[list[tuple[str, int]], dict[str, list[str]]]:
+    """Uncategorized SPEND merchants grouped by *normalized* merchant.
+
+    Scoped to direction='out' (income/refund credits are not spend) and to
+    non-self-transfer rows (hard-mapped to 'Self Transfer' without an LLM call).
+    Returns ``(merchants, variants)`` where ``merchants`` is a
+    ``(normalized_merchant, row_count)`` list (count-desc) and ``variants`` maps
+    each normalized merchant to the raw_merchant strings that collapse into it —
+    needed for the write-back, since SQL can't call the Python normalizer.
+
+    Normalization collapses ICICI-CC per-txn ref + reward-points so identical
+    merchants become one key (36 → 5 on Ayushi's CC), making categorization
+    deterministic and ~10× cheaper. Non-ICICI-CC strings pass through unchanged.
+    """
     rows = conn.execute(
         """
         SELECT raw_merchant, count(*)
@@ -143,11 +162,17 @@ def distinct_uncategorized_merchants(
           AND is_self_transfer IS NOT TRUE
           AND raw_merchant IS NOT NULL
         GROUP BY raw_merchant
-        ORDER BY count(*) DESC
         """,
         (user_id,),
     ).fetchall()
-    return [(r[0], r[1]) for r in rows]
+    counts: dict[str, int] = {}
+    variants: dict[str, list[str]] = {}
+    for raw, n in rows:
+        norm = normalize_merchant(raw)
+        counts[norm] = counts.get(norm, 0) + n
+        variants.setdefault(norm, []).append(raw)
+    merchants = sorted(counts.items(), key=lambda kv: -kv[1])
+    return merchants, variants
 
 
 def self_transfer_pending(conn: psycopg.Connection, user_id: str) -> int:
@@ -189,7 +214,7 @@ def main() -> int:
     # tagging rent/salary as self-transfer. Only hard-mapped rows get it.
     allowed_for_llm = [c for c in allowed if c != SELF_TRANSFER_CATEGORY]
 
-    merchants = distinct_uncategorized_merchants(conn, args.user)
+    merchants, norm_variants = distinct_uncategorized_merchants(conn, args.user)
     st_pending = self_transfer_pending(conn, args.user)
     merchant_names = [m for m, _ in merchants]
     row_count = {m: n for m, n in merchants}
@@ -271,13 +296,15 @@ def main() -> int:
 
     written = 0
     for merchant, cat in mapping.items():
+        # `merchant` is a normalized key; expand to the raw variants it collapsed.
+        raws = norm_variants.get(merchant, [merchant])
         cur = conn.execute(
             """
             UPDATE transactions SET category_id=%s
-            WHERE user_id=%s AND raw_merchant=%s AND direction='out'
+            WHERE user_id=%s AND raw_merchant = ANY(%s) AND direction='out'
               AND category_id IS NULL AND is_self_transfer IS NOT TRUE
             """,
-            (name_to_id[cat], args.user, merchant),
+            (name_to_id[cat], args.user, raws),
         )
         written += cur.rowcount
 

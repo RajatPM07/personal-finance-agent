@@ -143,11 +143,18 @@ class TestOverrides:
         from scripts.backfill_categorization import override_category
         assert override_category("Swiggy") is None
 
+    def test_cc_line_items_map_to_bank_charges(self):
+        # ICICI CC interest / tax lines the LLM is told not to guess.
+        from scripts.backfill_categorization import override_category
+        assert override_category("Interest Charges") == "Bank Charges"
+        assert override_category("Interest Amount Amortization -") == "Bank Charges"
+        assert override_category("IGST-CI@18%") == "Bank Charges"
+
     def test_override_targets_are_valid_categories(self):
         # Every override value must be a real taxonomy category, else apply fails.
         from scripts.backfill_categorization import KNOWN_OVERRIDES
         for _needle, cat in KNOWN_OVERRIDES:
-            assert cat in {"Rent", "Self Transfer"}
+            assert cat in {"Rent", "Self Transfer", "Bank Charges"}
 
 
 class TestFinalizeMapping:
