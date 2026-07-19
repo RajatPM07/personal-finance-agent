@@ -97,6 +97,8 @@ The parser (`skills/finance/ingestion/parsers/icici_savings.py`) handles two lay
 
 OPT format UPI transactions are skipped (D1 rule — Paytm is source of truth). Large non-Paytm UPI transfers (e.g. rent to Sunil Bhatkar) must be manually inserted.
 
+> **⚠️ D1 rule is being made account-scoped (in progress, 2026-07-19).** The D1 "skip UPI" assumption only holds for accounts where Paytm is the UPI source of truth (Rajat's). Accounts **not** backed by Paytm — e.g. Ayushi's ICICI savings, ingested from an `OpTransactionHistory*.xls` via `icici-savings-xls/v1` — must **ingest** UPI rows instead: the global skip currently drops the bulk of her merchant spend (she pays merchants by UPI directly, not via Paytm). Decision: **bank = source of truth** for such accounts. Fix plan: `tasks/todo-ayushi-upi-ingestion.md` (account-scope D1 → re-ingest xls, ordinals stable so existing rows dedupe → categorize by `UPI/<merchant>/` → supersede PhonePe rows that duplicate a bank row on (date, amount), strict 1:1; step 4 dedup still needs go-ahead). Per-account financial specifics + counts are in local session memory — kept out of the repo as third-party PII. Bank source files live in `Aayushi Statement/` (gitignored).
+
 ### psycopg3 in scripts
 One-off scripts must use `psycopg.connect(DB_URL, prepare_threshold=None)` to avoid "prepared statement _pg3_0 already exists" errors on repeated short-lived connections.
 
