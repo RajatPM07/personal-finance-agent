@@ -22,7 +22,7 @@ from typing import Any, cast
 from aiogram import Bot
 
 from skills.finance.agents.review_config import load_review_config
-from skills.finance.lib.db import service_client
+from skills.finance.lib.db import adb, service_client
 from skills.finance.lib.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,9 @@ async def check_anthropic_balance() -> None:
     """Scheduled daily — fire a Telegram alert when balance drops below threshold."""
     cfg = load_review_config()
     try:
-        balance = _fetch_anthropic_balance_usd()
+        # CLAUDE.md invariant #1: sync Supabase access from an async job must
+        # hop through adb() so the event loop is never blocked.
+        balance = await adb(_fetch_anthropic_balance_usd)
     except Exception as e:  # noqa: BLE001
         logger.exception("anthropic balance check failed")
         await send_alert(
